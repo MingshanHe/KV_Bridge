@@ -23,7 +23,10 @@ Every push to `main` publishes both apps to the
 
 - **Windows:** download
   [`kvm-win.exe`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-win.exe)
-- **Mac:** install with one Terminal command (works on Apple Silicon and Intel):
+- **Mac:** download
+  [`kvm-mac.dmg`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-mac.dmg),
+  open it, drag the `kvm-mac` folder to your Desktop, and follow *READ ME FIRST*.
+  Or install with one Terminal command (works on Apple Silicon and Intel):
 
   ```sh
   curl -fsSL https://raw.githubusercontent.com/MingshanHe/KV_Bridge/main/install-mac.sh | bash

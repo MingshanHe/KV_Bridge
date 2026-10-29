@@ -3,17 +3,18 @@
 #   curl -fsSL https://raw.githubusercontent.com/MingshanHe/KV_Bridge/main/install-mac.sh | bash
 set -euo pipefail
 
-URL="https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-mac-macos.zip"
+URL="https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-mac.dmg"
 DEST="$HOME/kvm-mac"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "Downloading kvm-mac..."
-curl -fsSL -o "$TMP/kvm-mac.zip" "$URL"
-ditto -x -k "$TMP/kvm-mac.zip" "$TMP"
+curl -fsSL -o "$TMP/kvm-mac.dmg" "$URL"
+hdiutil attach -quiet -nobrowse -readonly -mountpoint "$TMP/mnt" "$TMP/kvm-mac.dmg"
 
 rm -rf "$DEST"
-mv "$TMP/kvm-mac" "$DEST"
+cp -R "$TMP/mnt/kvm-mac" "$DEST"
+hdiutil detach -quiet "$TMP/mnt"
 chmod +x "$DEST/kvm-mac" "$DEST/Start kvm-mac.command"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 

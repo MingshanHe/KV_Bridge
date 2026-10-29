@@ -53,13 +53,17 @@ jobs:
           codesign --force --sign - dist/kvm-mac/kvm-mac
           cp "mac-client/start.command" "dist/kvm-mac/Start kvm-mac.command"
           chmod +x dist/kvm-mac/kvm-mac "dist/kvm-mac/Start kvm-mac.command"
-          # ditto makes a Finder-compatible zip that keeps the executable bits.
-          ditto -c -k --keepParent dist/kvm-mac dist/kvm-mac-macos.zip
           lipo -info dist/kvm-mac/kvm-mac
+          # Disk image: a "kvm-mac" folder to drag out, plus instructions.
+          mkdir -p dist/dmg
+          cp -R dist/kvm-mac dist/dmg/
+          cp mac-client/dmg-readme.txt "dist/dmg/READ ME FIRST.txt"
+          hdiutil create -volname "kvm-mac" -srcfolder dist/dmg -ov -format UDZO dist/kvm-mac.dmg
+          hdiutil verify dist/kvm-mac.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: kvm-mac-macos
-          path: dist/kvm-mac-macos.zip
+          path: dist/kvm-mac.dmg
 
   release:
     # Publish both apps as a direct download (no GitHub login, no nested zips).
@@ -81,6 +85,6 @@ jobs:
         run: |
           ls -la out
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest out/kvm-win.exe out/kvm-mac-macos.zip \
+          gh release create latest out/kvm-win.exe out/kvm-mac.dmg \
             --target "$GITHUB_SHA" --prerelease --title "Latest build" \
-            --notes "Built from ${GITHUB_SHA::7}. Mac: run the installer in the README. Windows: download kvm-win.exe."
+            --notes "Built from ${GITHUB_SHA::7}. Mac: download kvm-mac.dmg. Windows: download kvm-win.exe."

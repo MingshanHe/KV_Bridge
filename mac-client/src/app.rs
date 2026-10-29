@@ -114,7 +114,14 @@ fn session(
         match msg {
             Msg::Enter => {
                 let (x, y) = cursor_position();
-                inj.sync_pointer(x, y, screen_bounds());
+                let bounds = screen_bounds();
+                if verbose {
+                    println!(
+                        "  cursor at ({x:.0}, {y:.0}), screen area {:.0}x{:.0} at ({:.0}, {:.0})",
+                        bounds.w, bounds.h, bounds.x, bounds.y
+                    );
+                }
+                inj.sync_pointer(x, y, bounds);
                 // Keep the display on while it's being driven remotely.
                 awake = keep_awake();
                 println!(">>> Windows keyboard and mouse are controlling this Mac");

@@ -46,6 +46,13 @@ fn router() -> std::sync::MutexGuard<'static, Router> {
 }
 
 pub fn run(opts: Options) {
+    // Without this, a laptop running at 125%/150% display scaling gives us scaled
+    // coordinates from GetCursorPos/SetCursorPos but real pixels in the mouse hook,
+    // and the mismatch looks like a huge movement on every event (the Mac cursor
+    // flies into a corner). Being DPI-aware makes every API use real pixels.
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     LOG_KEYS.store(opts.log_keys, Ordering::Relaxed);
     let _ = ROUTER.set(Mutex::new(Router::new(Config {
         toggle_button: opts.toggle_button,
@@ -147,7 +154,13 @@ fn park_cursor(r: &mut Router) {
         }
         let (cx, cy) = (GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2);
         SetCursorPos(cx, cy);
-        r.set_anchor(cx, cy);
+        // Anchor where the cursor really ended up, in the same coordinates the hook uses.
+        let mut a = POINT { x: cx, y: cy };
+        GetCursorPos(&mut a);
+        r.set_anchor(a.x, a.y);
+        if LOG_KEYS.load(Ordering::Relaxed) {
+            ui(format!("cursor parked at ({}, {}); mouse deltas are measured from here", a.x, a.y));
+        }
     }
 }
 
@@ -171,6 +184,11 @@ fn route(input: Input) -> bool {
         }
         d
     };
+    if LOG_KEYS.load(Ordering::Relaxed) {
+        if let Input::MouseMove { x, y } = input {
+            log_move(x, y, &decision.send);
+        }
+    }
     if let Some(tx) = NET_TX.get() {
         for m in decision.send {
             let _ = tx.send(m);
@@ -180,6 +198,18 @@ fn route(input: Input) -> bool {
         let _ = tx.send(Ui::Notice(n));
     }
     decision.block
+}
+
+/// With --log: print roughly every 20th mouse event while on the Mac, enough to see
+/// the deltas without flooding the console.
+fn log_move(x: i32, y: i32, sent: &[Msg]) {
+    use std::sync::atomic::AtomicU32;
+    static N: AtomicU32 = AtomicU32::new(0);
+    if let Some(Msg::MouseMove { dx, dy }) = sent.first() {
+        if N.fetch_add(1, Ordering::Relaxed).is_multiple_of(20) {
+            ui(format!("mouse at ({x}, {y}) -> sent dx={dx} dy={dy}"));
+        }
+    }
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

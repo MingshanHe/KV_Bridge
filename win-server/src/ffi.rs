@@ -76,6 +76,9 @@ pub const XBUTTON2: u16 = 0x0002;
 pub const LLKHF_EXTENDED: u32 = 0x01;
 pub const LLKHF_INJECTED: u32 = 0x10;
 
+/// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Windows 10 1703+).
+pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
 
@@ -95,6 +98,7 @@ extern "system" {
     pub fn SetCursorPos(x: i32, y: i32) -> BOOL;
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
     pub fn MessageBeep(uType: u32) -> BOOL;
+    pub fn SetProcessDpiAwarenessContext(value: isize) -> BOOL;
 }
 
 #[cfg_attr(windows, link(name = "kernel32"))]

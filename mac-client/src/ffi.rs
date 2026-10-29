@@ -84,6 +84,12 @@ extern "C" {
     pub fn CGEventPost(tap: u32, event: CGEventRef);
     pub fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     pub fn CGDisplayBounds(display: u32) -> CGRect;
+    pub fn CGMainDisplayID() -> u32;
+    pub fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
+    pub fn CGDisplayShowCursor(display: u32) -> i32;
+    /// boolean_t (int)
+    pub fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
+    pub fn CGEventSourceSetLocalEventsSuppressionInterval(source: CGEventSourceRef, seconds: f64);
 }
 
 #[cfg_attr(target_os = "macos", link(name = "CoreFoundation", kind = "framework"))]

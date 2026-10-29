@@ -113,15 +113,20 @@ fn session(
         }
         match msg {
             Msg::Enter => {
-                let (x, y) = cursor_position();
                 let bounds = screen_bounds();
+                // Start every session with the cursor visible in the middle of the
+                // main screen, so it's always easy to find.
+                let (x, y) = main_screen_center();
                 if verbose {
+                    let (cx, cy) = cursor_position();
                     println!(
-                        "  cursor at ({x:.0}, {y:.0}), screen area {:.0}x{:.0} at ({:.0}, {:.0})",
+                        "  cursor was at ({cx:.0}, {cy:.0}); moving it to ({x:.0}, {y:.0}). \
+                         Screen area {:.0}x{:.0} at ({:.0}, {:.0})",
                         bounds.w, bounds.h, bounds.x, bounds.y
                     );
                 }
                 inj.sync_pointer(x, y, bounds);
+                poster.show_cursor_at(x, y);
                 // Keep the display on while it's being driven remotely.
                 awake = keep_awake();
                 println!(">>> Windows keyboard and mouse are controlling this Mac");
@@ -218,13 +223,48 @@ fn screen_bounds() -> Rect {
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
+fn main_screen_center() -> (f64, f64) {
+    let r = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+    if r.size.width < 1.0 || r.size.height < 1.0 {
+        return cursor_position();
+    }
+    (r.origin.x + r.size.width / 2.0, r.origin.y + r.size.height / 2.0)
+}
+
 struct Poster {
     src: CGEventSourceRef,
 }
 
 impl Poster {
     fn new() -> Self {
-        Poster { src: unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) } }
+        let src = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
+        unsafe {
+            if !src.is_null() {
+                // Don't freeze the Mac's own trackpad after each warp.
+                CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0);
+            }
+            CGAssociateMouseAndMouseCursorPosition(1);
+        }
+        Poster { src }
+    }
+
+    /// Put the cursor at (x, y), make sure it isn't hidden, and tell apps it moved.
+    fn show_cursor_at(&self, x: f64, y: f64) {
+        unsafe {
+            CGAssociateMouseAndMouseCursorPosition(1);
+            CGWarpMouseCursorPosition(CGPoint { x, y });
+            CGDisplayShowCursor(CGMainDisplayID());
+        }
+        self.post(&Out::Mouse {
+            kind: MouseKind::Moved,
+            button: 0,
+            x,
+            y,
+            dx: 0,
+            dy: 0,
+            clicks: 0,
+            flags: crate::state::flag::NON_COALESCED,
+        });
     }
 
     fn post(&self, out: &Out) {
@@ -260,6 +300,9 @@ impl Poster {
                     if matches!(kind, MouseKind::Moved | MouseKind::Dragged) {
                         CGEventSetIntegerValueField(e, kCGMouseEventDeltaX, dx);
                         CGEventSetIntegerValueField(e, kCGMouseEventDeltaY, dy);
+                        // Move the real cursor directly too; a posted event alone
+                        // doesn't always move it.
+                        CGWarpMouseCursorPosition(CGPoint { x, y });
                     }
                     CGEventSetFlags(e, flags);
                     e

@@ -176,6 +176,17 @@ fn unpark_cursor() {
 fn route(input: Input) -> bool {
     let decision = {
         let mut r = router();
+        if let Input::MouseMove { .. } = input {
+            if r.mode() == kvm_core::router::Mode::Remote {
+                // Measure each movement from where the cursor really is right now
+                // (inside the hook, before this move is applied). Robust against
+                // display scaling and anything else nudging the cursor.
+                let mut c = POINT::default();
+                if unsafe { GetCursorPos(&mut c) } != 0 {
+                    r.set_anchor(c.x, c.y);
+                }
+            }
+        }
         let d = r.handle(input, now_ms());
         match d.notice {
             Some(Notice::EnteredRemote) => park_cursor(&mut r),

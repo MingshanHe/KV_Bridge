@@ -18,11 +18,19 @@ CoreGraphics on macOS).
 
 ## Get the apps
 
-Every push to GitHub builds both apps (see the **Actions** tab → latest run →
-*Artifacts*):
+Every push to `main` publishes both apps to the
+[**Latest build** release](https://github.com/MingshanHe/KV_Bridge/releases/tag/latest):
 
-- `kvm-win-windows` → `kvm-win.exe`
-- `kvm-mac-macos` → `kvm-mac.tar.gz` (one binary for Apple Silicon and Intel Macs)
+- **Windows:** download
+  [`kvm-win.exe`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-win.exe)
+- **Mac:** install with one Terminal command (works on Apple Silicon and Intel):
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/MingshanHe/KV_Bridge/main/install-mac.sh | bash
+  ```
+
+  This puts the app in `~/kvm-mac` and clears macOS's download block, so there's
+  nothing to unzip by hand. Run the same command again to update.
 
 To build yourself, install Rust from <https://rustup.rs> and run
 `cargo build --release -p kvm-win` on Windows or `cargo build --release -p kvm-mac` on the Mac.
@@ -34,16 +42,13 @@ Both laptops must be on the same network.
 ### 1. Mac: allow it to type (one time)
 
 ```sh
-cd ~/Downloads
-tar -xzf kvm-mac.tar.gz
-xattr -d com.apple.quarantine kvm-mac   # downloaded binaries are blocked otherwise
-./kvm-mac --test-type
+~/kvm-mac/kvm-mac --test-type
 ```
 
 macOS will ask for **Accessibility** access for Terminal. Turn it on in
-*System Settings → Privacy & Security → Accessibility*, then run
-`./kvm-mac --test-type` again and click into TextEdit. It should type
-`hello from kvm bridge`. If it does, the Mac side works.
+*System Settings → Privacy & Security → Accessibility*, then run the command again
+and click into TextEdit. It should type `hello from kvm bridge`. If it does, the Mac
+side works.
 
 ### 2. Windows: start the sender
 
@@ -61,8 +66,11 @@ leave `--log` off in normal use.)
 ### 3. Mac: connect
 
 ```sh
-./kvm-mac 192.168.x.x        # the address kvm-win printed
+~/kvm-mac/kvm-mac 192.168.x.x        # the address kvm-win printed
 ```
+
+Or double-click **Start kvm-mac** in the `kvm-mac` folder in your home folder. It asks
+for the address once and remembers it (`rm ~/.kvm-mac-host` to change it).
 
 ### 4. Switch
 

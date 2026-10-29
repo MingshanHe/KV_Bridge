@@ -13,7 +13,7 @@ jobs:
     name: Tests and lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup component add clippy
       - name: Unit tests (protocol, key mapping, switching, Mac event logic)
         run: cargo test --workspace
@@ -27,7 +27,7 @@ jobs:
     needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo build --release -p kvm-win
       - uses: actions/upload-artifact@v4
         with:
@@ -39,21 +39,48 @@ jobs:
     needs: test
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: cargo build --release -p kvm-mac --target aarch64-apple-darwin
       - run: cargo build --release -p kvm-mac --target x86_64-apple-darwin
-      - name: Make a universal binary
+      - name: Package universal binary + launcher
         run: |
-          mkdir -p dist
+          mkdir -p dist/kvm-mac
           lipo -create \
             target/aarch64-apple-darwin/release/kvm-mac \
             target/x86_64-apple-darwin/release/kvm-mac \
-            -output dist/kvm-mac
-          codesign --force --sign - dist/kvm-mac
-          # tar keeps the executable bit, which artifact zips drop.
-          tar -czf dist/kvm-mac.tar.gz -C dist kvm-mac
+            -output dist/kvm-mac/kvm-mac
+          codesign --force --sign - dist/kvm-mac/kvm-mac
+          cp "mac-client/start.command" "dist/kvm-mac/Start kvm-mac.command"
+          chmod +x dist/kvm-mac/kvm-mac "dist/kvm-mac/Start kvm-mac.command"
+          # ditto makes a Finder-compatible zip that keeps the executable bits.
+          ditto -c -k --keepParent dist/kvm-mac dist/kvm-mac-macos.zip
+          lipo -info dist/kvm-mac/kvm-mac
       - uses: actions/upload-artifact@v4
         with:
           name: kvm-mac-macos
-          path: dist/kvm-mac.tar.gz
+          path: dist/kvm-mac-macos.zip
+
+  release:
+    # Publish both apps as a direct download (no GitHub login, no nested zips).
+    name: Publish "latest" release
+    needs: [windows, macos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Replace the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la out
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/kvm-win.exe out/kvm-mac-macos.zip \
+            --target "$GITHUB_SHA" --prerelease --title "Latest build" \
+            --notes "Built from ${GITHUB_SHA::7}. Mac: run the installer in the README. Windows: download kvm-win.exe."

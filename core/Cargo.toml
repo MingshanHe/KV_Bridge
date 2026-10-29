@@ -1,0 +1,8 @@
+[package]
+name = "kvm-core"
+description = "Shared protocol, key mapping and switching logic for kvm-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

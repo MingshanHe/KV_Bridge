@@ -1,0 +1,17 @@
+[package]
+name = "kvm-win"
+description = "kvm-bridge sender: runs on the Windows laptop that owns the keyboard and Logitech Lift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kvm-win"
+path = "src/main.rs"
+
+[dependencies]
+kvm-core = { path = "../core" }
+
+[lints.rust]
+# `--cfg kvm_check` type-checks the Windows code on other OSes (no linking happens).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kvm_check)"] }

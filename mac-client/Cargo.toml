@@ -1,0 +1,17 @@
+[package]
+name = "kvm-mac"
+description = "kvm-bridge receiver: runs on the Mac and replays the Windows keyboard and mouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kvm-mac"
+path = "src/main.rs"
+
+[dependencies]
+kvm-core = { path = "../core" }
+
+[lints.rust]
+# `--cfg kvm_check` type-checks the macOS code on other OSes (no linking happens).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kvm_check)"] }

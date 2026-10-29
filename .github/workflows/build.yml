@@ -1,0 +1,59 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - name: Unit tests (protocol, key mapping, switching, Mac event logic)
+        run: cargo test --workspace
+      - name: Type-check and lint the Windows and macOS code
+        run: cargo clippy --workspace -- -D warnings
+        env:
+          RUSTFLAGS: --cfg kvm_check
+
+  windows:
+    name: Windows app (kvm-win.exe)
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release -p kvm-win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kvm-win-windows
+          path: target/release/kvm-win.exe
+
+  macos:
+    name: macOS app (kvm-mac, Apple Silicon + Intel)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo build --release -p kvm-mac --target aarch64-apple-darwin
+      - run: cargo build --release -p kvm-mac --target x86_64-apple-darwin
+      - name: Make a universal binary
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/kvm-mac \
+            target/x86_64-apple-darwin/release/kvm-mac \
+            -output dist/kvm-mac
+          codesign --force --sign - dist/kvm-mac
+          # tar keeps the executable bit, which artifact zips drop.
+          tar -czf dist/kvm-mac.tar.gz -C dist kvm-mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kvm-mac-macos
+          path: dist/kvm-mac.tar.gz

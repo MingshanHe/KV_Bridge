@@ -27,7 +27,8 @@ USAGE:
 
 OPTIONS:
     --port <N>            Port kvm-win listens on (default 24900)
-    --no-swap             Keep Ctrl as Ctrl (default: Ctrl->Cmd, Win->Ctrl)
+    --no-swap             Send keys as they are: no Ctrl->Cmd and no
+                          Windows-style shortcuts (Alt+Tab, terminal Ctrl+C...)
     --invert-scroll       Reverse the scroll direction
     --scroll-speed <PX>   Pixels per wheel notch (default 40)
     --jis                 Japanese keyboard: 英数/Caps -> Eisu, 半角/全角 toggles Eisu/Kana

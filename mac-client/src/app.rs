@@ -1,7 +1,7 @@
 //! Network loop and CoreGraphics event posting for kvm-mac.
 
 use crate::ffi::*;
-use crate::state::{Injector, MouseKind, Out, Rect};
+use crate::state::{Ctx, Injector, MouseKind, NoCtx, Out, Rect};
 use crate::Options;
 use kvm_core::protocol::{Msg, VERSION};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -45,12 +45,13 @@ pub fn run(opts: Options) {
 
     println!("kvm-mac {}", env!("CARGO_PKG_VERSION"));
     let mut inj = Injector::new(opts.settings.clone());
+    let mut ctx = MacCtx::new(opts.verbose);
     loop {
         println!("Connecting to {addr} ...");
         match TcpStream::connect_timeout(&addr, PEER_TIMEOUT) {
             Ok(stream) => {
                 println!("Connected. Press the Lift button on Windows to control this Mac.");
-                let reason = session(stream, &mut inj, &poster, opts.verbose, &now_ms);
+                let reason = session(stream, &mut inj, &mut ctx, &poster, opts.verbose, &now_ms);
                 for o in inj.release_all() {
                     poster.post(&o);
                 }
@@ -71,6 +72,7 @@ fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
 fn session(
     mut stream: TcpStream,
     inj: &mut Injector,
+    ctx: &mut MacCtx,
     poster: &Poster,
     verbose: bool,
     now_ms: &dyn Fn() -> u64,
@@ -132,14 +134,14 @@ fn session(
                 println!(">>> Windows keyboard and mouse are controlling this Mac");
             }
             Msg::Leave => {
-                for o in inj.handle(msg, now_ms()) {
+                for o in inj.handle(msg, now_ms(), ctx) {
                     poster.post(&o);
                 }
                 stop(&mut awake);
                 println!("<<< Control returned to Windows");
             }
             other => {
-                for o in inj.handle(other, now_ms()) {
+                for o in inj.handle(other, now_ms(), ctx) {
                     poster.post(&o);
                 }
             }
@@ -221,6 +223,123 @@ fn screen_bounds() -> Rect {
         y1 = y1.max(r.origin.y + r.size.height);
     }
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+/// Terminal apps, matched against the frontmost app's executable path.
+const TERMINALS: &[&str] = &[
+    "/terminal.app/",
+    "/iterm.app/",
+    "/iterm2.app/",
+    "/warp.app/",
+    "/alacritty.app/",
+    "/kitty.app/",
+    "/wezterm.app/",
+    "/ghostty.app/",
+    "/hyper.app/",
+    "/tabby.app/",
+    "/rio.app/",
+];
+
+/// Answers the shortcut rules' questions using the Accessibility API
+/// (the same permission kvm-mac already needs to type).
+struct MacCtx {
+    system: AXUIElementRef,
+    attr_focused_app: CFStringRef,
+    attr_focused_element: CFStringRef,
+    attr_selected_text: CFStringRef,
+    verbose: bool,
+    last_app: String,
+}
+
+fn cfstr(s: &str) -> CFStringRef {
+    let c = std::ffi::CString::new(s).expect("no NUL");
+    unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), kCFStringEncodingUTF8) }
+}
+
+impl MacCtx {
+    fn new(verbose: bool) -> Self {
+        let system = unsafe { AXUIElementCreateSystemWide() };
+        if !system.is_null() {
+            // Never let a hung app stall our input handling for long.
+            unsafe { AXUIElementSetMessagingTimeout(system, 0.2) };
+        }
+        MacCtx {
+            system,
+            attr_focused_app: cfstr("AXFocusedApplication"),
+            attr_focused_element: cfstr("AXFocusedUIElement"),
+            attr_selected_text: cfstr("AXSelectedText"),
+            verbose,
+            last_app: String::new(),
+        }
+    }
+
+    /// Copy an attribute; the caller must CFRelease a non-null result.
+    fn copy_attr(&self, el: AXUIElementRef, attr: CFStringRef) -> CFTypeRef {
+        if el.is_null() || attr.is_null() {
+            return std::ptr::null();
+        }
+        let mut v: CFTypeRef = std::ptr::null();
+        let err = unsafe { AXUIElementCopyAttributeValue(el, attr, &mut v) };
+        if err == kAXErrorSuccess { v } else { std::ptr::null() }
+    }
+
+    fn front_app_path(&mut self) -> Option<String> {
+        let app = self.copy_attr(self.system, self.attr_focused_app);
+        if app.is_null() {
+            return None;
+        }
+        let mut pid = 0i32;
+        let ok = unsafe { AXUIElementGetPid(app, &mut pid) } == kAXErrorSuccess;
+        unsafe { CFRelease(app) };
+        if !ok {
+            return None;
+        }
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+        if n <= 0 {
+            return None;
+        }
+        buf.truncate(n as usize);
+        let path = String::from_utf8_lossy(&buf).into_owned();
+        if self.verbose && path != self.last_app {
+            println!("  front app: {path}");
+            self.last_app = path.clone();
+        }
+        Some(path)
+    }
+}
+
+impl Ctx for MacCtx {
+    fn front_is_terminal(&mut self) -> bool {
+        let Some(path) = self.front_app_path() else { return false };
+        let p = path.to_lowercase();
+        TERMINALS.iter().any(|t| p.contains(t))
+    }
+
+    fn has_selection(&mut self) -> bool {
+        let app = self.copy_attr(self.system, self.attr_focused_app);
+        if app.is_null() {
+            return false;
+        }
+        let el = self.copy_attr(app, self.attr_focused_element);
+        unsafe { CFRelease(app) };
+        if el.is_null() {
+            return false;
+        }
+        let text = self.copy_attr(el, self.attr_selected_text);
+        unsafe { CFRelease(el) };
+        if text.is_null() {
+            return false;
+        }
+        let len = unsafe {
+            if CFGetTypeID(text) == CFStringGetTypeID() { CFStringGetLength(text) } else { 0 }
+        };
+        unsafe { CFRelease(text) };
+        if self.verbose {
+            println!("  selected text: {len} characters");
+        }
+        len > 0
+    }
 }
 
 fn main_screen_center() -> (f64, f64) {
@@ -349,7 +468,7 @@ fn test_type(poster: &Poster) {
             _ => continue,
         };
         for msg in [Msg::KeyDown(hid), Msg::KeyUp(hid)] {
-            for o in inj.handle(msg, 0) {
+            for o in inj.handle(msg, 0, &mut NoCtx) {
                 poster.post(&o);
             }
             thread::sleep(Duration::from_millis(15));

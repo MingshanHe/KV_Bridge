@@ -8,6 +8,11 @@ pub type CGEventRef = *mut c_void;
 pub type CGEventSourceRef = *mut c_void;
 pub type CFTypeRef = *const c_void;
 pub type CFDictionaryRef = *const c_void;
+pub type CFStringRef = *const c_void;
+pub type AXUIElementRef = *const c_void;
+
+pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+pub const kAXErrorSuccess: i32 = 0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -104,6 +109,14 @@ extern "C" {
         value_callbacks: *const c_void,
     ) -> CFDictionaryRef;
     pub static kCFBooleanTrue: CFTypeRef;
+    pub fn CFStringCreateWithCString(
+        alloc: *const c_void,
+        c_str: *const std::ffi::c_char,
+        encoding: u32,
+    ) -> CFStringRef;
+    pub fn CFStringGetLength(s: CFStringRef) -> isize;
+    pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    pub fn CFStringGetTypeID() -> usize;
     // Only their addresses are used.
     pub static kCFTypeDictionaryKeyCallBacks: u8;
     pub static kCFTypeDictionaryValueCallBacks: u8;
@@ -114,4 +127,17 @@ extern "C" {
     /// Returns a C `Boolean` (unsigned char).
     pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
     pub static kAXTrustedCheckOptionPrompt: CFTypeRef;
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    pub fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
+    pub fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, seconds: f32) -> i32;
+}
+
+// libproc (part of libSystem, always linked).
+extern "C" {
+    pub fn proc_pidpath(pid: i32, buffer: *mut c_void, buffersize: u32) -> i32;
 }

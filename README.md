@@ -81,18 +81,43 @@ Press the Lift's **Forward** button. Windows beeps, the console title says
 *controlling MAC*, and your keyboard and mouse now drive the Mac. Press it again to
 return. **Ctrl+Alt+M** does the same as a keyboard fallback.
 
-## Key mapping on the Mac
+## Windows shortcuts on the Mac
 
-| Windows key | Mac key |
+While you control the Mac, the usual Windows shortcuts do the matching Mac thing:
+
+| On the Windows keyboard | On the Mac |
 |---|---|
-| Ctrl | Cmd (so Ctrl+C / Ctrl+V / Ctrl+Tab work as expected) |
-| Windows key | Ctrl |
+| Ctrl+C / V / X / Z / A / S / F / W ... | Cmd+C / V / X / Z / A / S / F / W ... |
+| **Alt+Tab** (hold Alt, tap Tab) | App switcher (Cmd+Tab); Alt+Shift+Tab goes back |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab (browsers, editors) |
+| Ctrl+Left / Right | Jump by word |
+| Ctrl+Backspace / Delete | Delete a word |
+| Home / End | Start / end of line |
+| Ctrl+Home / Ctrl+End | Start / end of document |
+| Ctrl+click | Cmd+click (add to selection) |
 | Alt | Option |
+| Windows key | Ctrl |
 | 変換 / 無変換 | かな / 英数 |
-| Back thumb button | Back (button 4) |
+| Back thumb button | Back |
 
-Use `--no-swap` on the Mac to keep Ctrl as Ctrl. With a Japanese keyboard add `--jis`:
-the 英数 (Caps) key selects 英数 and 半角/全角 toggles 英数/かな.
+**In terminal apps** (Terminal, iTerm2, Warp, Alacritty, kitty, WezTerm, Ghostty, Hyper,
+Tabby) it works like Windows Terminal:
+
+| On the Windows keyboard | In the Mac terminal |
+|---|---|
+| Ctrl+C with text selected | Copy |
+| Ctrl+C with nothing selected | Stop the running program (real Ctrl+C) |
+| Ctrl+V | Paste |
+| Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste (always) |
+| Ctrl+Shift+T / W / N | New tab / close tab / new window |
+| Any other Ctrl key (Ctrl+D, Ctrl+R, Ctrl+L, Ctrl+Z ...) | Real Ctrl, as in Linux shells |
+
+If Ctrl+C ever stops the program when you meant to copy, use **Ctrl+Shift+C**, which
+always copies.
+
+Run the Mac app with `--no-swap` to turn all of this off and send keys exactly as they
+are. With a Japanese keyboard add `--jis`: the 英数 (Caps) key selects 英数 and
+半角/全角 toggles 英数/かな.
 
 ## Options
 

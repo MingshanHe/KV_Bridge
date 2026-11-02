@@ -95,6 +95,8 @@ extern "C" {
     /// boolean_t (int)
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
     pub fn CGEventSourceSetLocalEventsSuppressionInterval(source: CGEventSourceRef, seconds: f64);
+    pub fn CGEventSourceSetKeyboardType(source: CGEventSourceRef, keyboard_type: u32);
+    pub fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, string: *const u16);
 }
 
 #[cfg_attr(target_os = "macos", link(name = "CoreFoundation", kind = "framework"))]
@@ -115,6 +117,7 @@ extern "C" {
         encoding: u32,
     ) -> CFStringRef;
     pub fn CFStringGetLength(s: CFStringRef) -> isize;
+    pub fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
     pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
     pub fn CFStringGetTypeID() -> usize;
     // Only their addresses are used.
@@ -135,6 +138,29 @@ extern "C" {
     ) -> i32;
     pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     pub fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, seconds: f32) -> i32;
+}
+
+// Keyboard layouts (Text Input Sources) and key translation.
+pub const kUCKeyActionDown: u16 = 0;
+#[cfg_attr(target_os = "macos", link(name = "Carbon", kind = "framework"))]
+extern "C" {
+    pub fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+    pub fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef;
+    pub fn TISGetInputSourceProperty(source: CFTypeRef, key: CFStringRef) -> *const c_void;
+    pub static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+    pub fn LMGetKbdType() -> u8;
+    pub fn UCKeyTranslate(
+        layout: *const c_void,
+        virtual_key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        key_translate_options: u32,
+        dead_key_state: *mut u32,
+        max_string_length: usize,
+        actual_string_length: *mut usize,
+        unicode_string: *mut u16,
+    ) -> i32;
 }
 
 // libproc (part of libSystem, always linked).

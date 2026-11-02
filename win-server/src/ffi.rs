@@ -99,6 +99,9 @@ extern "system" {
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
     pub fn MessageBeep(uType: u32) -> BOOL;
     pub fn SetProcessDpiAwarenessContext(value: isize) -> BOOL;
+    pub fn GetForegroundWindow() -> HWND;
+    pub fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut u32) -> u32;
+    pub fn GetKeyboardLayout(idThread: u32) -> HANDLE;
 }
 
 #[cfg_attr(windows, link(name = "kernel32"))]

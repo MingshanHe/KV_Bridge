@@ -172,6 +172,14 @@ fn unpark_cursor() {
     }
 }
 
+/// The keyboard layout of the app in front (each Windows app can have its own).
+fn keyboard_layout() -> u32 {
+    unsafe {
+        let thread = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        GetKeyboardLayout(thread) as usize as u32
+    }
+}
+
 /// Run one input event through the router. Returns true to block it from Windows.
 fn route(input: Input) -> bool {
     let decision = {
@@ -201,6 +209,14 @@ fn route(input: Input) -> bool {
         }
     }
     if let Some(tx) = NET_TX.get() {
+        if decision.notice == Some(Notice::EnteredRemote) {
+            // Tell the Mac which layout this keyboard is, so it can translate symbols.
+            let hkl = keyboard_layout();
+            if LOG_KEYS.load(Ordering::Relaxed) {
+                ui(format!("keyboard layout 0x{hkl:08x}"));
+            }
+            let _ = tx.send(Msg::Layout(hkl));
+        }
         for m in decision.send {
             let _ = tx.send(m);
         }

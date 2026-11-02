@@ -132,6 +132,10 @@ fn session(
                 // Keep the display on while it's being driven remotely.
                 awake = keep_awake();
                 println!(">>> Windows keyboard and mouse are controlling this Mac");
+                match inj.win_layout() {
+                    Some(l) => println!("    {} keyboard: symbols are typed as on the Windows keyboard", l.name()),
+                    None => println!("    keyboard layout not translated (keys sent by position)"),
+                }
             }
             Msg::Leave => {
                 for o in inj.handle(msg, now_ms(), ctx) {
@@ -249,6 +253,84 @@ struct MacCtx {
     attr_selected_text: CFStringRef,
     verbose: bool,
     last_app: String,
+    keys: KeyMap,
+}
+
+/// Character -> Mac key, for the current keyboard layout. Rebuilt whenever the
+/// input source or keyboard type changes.
+#[derive(Default)]
+struct KeyMap {
+    source: usize,
+    kbd_type: u32,
+    map: std::collections::HashMap<char, (u16, bool, bool)>,
+}
+
+/// Keypad and control keys: never used to type a symbol.
+fn skip_keycode(k: u16) -> bool {
+    matches!(k, 0x24 | 0x30 | 0x31 | 0x33 | 0x35 | 0x41 | 0x43 | 0x45 | 0x47 | 0x4B | 0x4C | 0x4E)
+        || (0x51..=0x5C).contains(&k)
+        || k >= 0x5F // keypad comma, F-keys, arrows, 英数/かな
+}
+
+impl KeyMap {
+    fn refresh(&mut self) {
+        unsafe {
+            let mut src = TISCopyCurrentKeyboardLayoutInputSource();
+            let mut data = if src.is_null() {
+                std::ptr::null()
+            } else {
+                TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData)
+            };
+            if data.is_null() {
+                // Some input methods have no layout data of their own.
+                if !src.is_null() {
+                    CFRelease(src);
+                }
+                src = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+                if src.is_null() {
+                    return;
+                }
+                data = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData);
+            }
+            let kbd = LMGetKbdType() as u32;
+            if !data.is_null() && (data as usize != self.source || kbd != self.kbd_type) {
+                self.source = data as usize;
+                self.kbd_type = kbd;
+                self.build(CFDataGetBytePtr(data) as *const _, kbd);
+            }
+            CFRelease(src);
+        }
+    }
+
+    /// Ask the layout what every key types, preferring no modifier, then Shift,
+    /// then Option, then Option+Shift. Dead keys are skipped.
+    unsafe fn build(&mut self, layout: *const std::ffi::c_void, kbd: u32) {
+        self.map.clear();
+        // UCKeyTranslate modifier state: (EventModifiers >> 8) & 0xFF.
+        let states = [(0u32, false, false), (0x02, true, false), (0x08, false, true), (0x0A, true, true)];
+        for (state, shift, option) in states {
+            for code in 0u16..0x80 {
+                if skip_keycode(code) {
+                    continue;
+                }
+                let mut dead = 0u32;
+                let mut len = 0usize;
+                let mut buf = [0u16; 4];
+                let err = UCKeyTranslate(
+                    layout, code, kUCKeyActionDown, state, kbd, 0,
+                    &mut dead, buf.len(), &mut len, buf.as_mut_ptr(),
+                );
+                if err != 0 || dead != 0 || len != 1 {
+                    continue;
+                }
+                if let Some(ch) = char::from_u32(buf[0] as u32) {
+                    if !ch.is_control() && ch != ' ' {
+                        self.map.entry(ch).or_insert((code, shift, option));
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn cfstr(s: &str) -> CFStringRef {
@@ -270,6 +352,7 @@ impl MacCtx {
             attr_selected_text: cfstr("AXSelectedText"),
             verbose,
             last_app: String::new(),
+            keys: KeyMap::default(),
         }
     }
 
@@ -310,6 +393,22 @@ impl MacCtx {
 }
 
 impl Ctx for MacCtx {
+    fn keystroke_for(&mut self, ch: char) -> Option<(u16, bool, bool)> {
+        self.keys.refresh();
+        let k = self.keys.map.get(&ch).copied();
+        if self.verbose {
+            match k {
+                Some((code, sh, opt)) => println!(
+                    "  '{ch}' -> Mac key 0x{code:02x}{}{}",
+                    if sh { " +Shift" } else { "" },
+                    if opt { " +Option" } else { "" }
+                ),
+                None => println!("  '{ch}' -> typed as text (no Mac key for it)"),
+            }
+        }
+        k
+    }
+
     fn front_is_terminal(&mut self) -> bool {
         let Some(path) = self.front_app_path() else { return false };
         let p = path.to_lowercase();
@@ -361,6 +460,8 @@ impl Poster {
             if !src.is_null() {
                 // Don't freeze the Mac's own trackpad after each warp.
                 CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0);
+                // Same keyboard type (JIS/ISO/ANSI) as this Mac's own keyboard.
+                CGEventSourceSetKeyboardType(src, LMGetKbdType() as u32);
             }
             CGAssociateMouseAndMouseCursorPosition(1);
         }
@@ -425,6 +526,21 @@ impl Poster {
                     }
                     CGEventSetFlags(e, flags);
                     e
+                }
+                Out::Text(ch) => {
+                    let mut units = [0u16; 2];
+                    let units = ch.encode_utf16(&mut units);
+                    for down in [true, false] {
+                        let e = CGEventCreateKeyboardEvent(self.src, 0, down);
+                        if e.is_null() {
+                            return;
+                        }
+                        CGEventSetFlags(e, crate::state::flag::NON_COALESCED);
+                        CGEventKeyboardSetUnicodeString(e, units.len(), units.as_ptr());
+                        CGEventPost(kCGHIDEventTap, e);
+                        CFRelease(e as CFTypeRef);
+                    }
+                    return;
                 }
                 Out::Scroll { dy, dx } => {
                     let e = CGEventCreateScrollWheelEvent2(self.src, kCGScrollEventUnitPixel, 2, dy, dx, 0);

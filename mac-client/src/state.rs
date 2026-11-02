@@ -20,6 +20,7 @@
 //!   Ctrl+Shift+C / V / T / W / N -> copy / paste / new tab / close tab / new window.
 
 use kvm_core::keymap::{self, hid, mac};
+use kvm_core::layout::WinLayout;
 use kvm_core::protocol::{button, Msg, WHEEL_DELTA};
 
 /// CGEventFlags masks.
@@ -79,12 +80,30 @@ pub struct Settings {
     pub scroll_px_per_notch: f64,
     /// Japanese keyboard: Caps (英数) -> Eisu, 半角/全角 toggles Eisu/Kana.
     pub jis: bool,
+    /// How to treat symbol keys when the Windows and Mac layouts differ.
+    pub layout: LayoutMode,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { swap_ctrl_cmd: true, invert_scroll: false, scroll_px_per_notch: 40.0, jis: false }
+        Settings {
+            swap_ctrl_cmd: true,
+            invert_scroll: false,
+            scroll_px_per_notch: 40.0,
+            jis: false,
+            layout: LayoutMode::Auto,
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// Use the layout kvm-win reports.
+    Auto,
+    /// Treat the Windows keyboard as this layout.
+    Fixed(WinLayout),
+    /// Send key positions as they are.
+    Off,
 }
 
 /// What the shortcut rules need to know about the Mac right now.
@@ -94,6 +113,9 @@ pub trait Ctx {
     fn front_is_terminal(&mut self) -> bool;
     /// Does the focused element have selected text?
     fn has_selection(&mut self) -> bool;
+    /// Which Mac key types `ch` with the current input source:
+    /// (keycode, needs Shift, needs Option). None if no single key does.
+    fn keystroke_for(&mut self, ch: char) -> Option<(u16, bool, bool)>;
 }
 
 /// A context that knows nothing: not a terminal, no selection.
@@ -105,6 +127,9 @@ impl Ctx for NoCtx {
     }
     fn has_selection(&mut self) -> bool {
         false
+    }
+    fn keystroke_for(&mut self, _ch: char) -> Option<(u16, bool, bool)> {
+        None
     }
 }
 
@@ -132,6 +157,8 @@ pub enum Out {
     Mouse { kind: MouseKind, button: u32, x: f64, y: f64, dx: i64, dy: i64, clicks: i64, flags: u64 },
     /// Pixels, CoreGraphics sign convention (positive y = up, positive x = left).
     Scroll { dy: i32, dx: i32 },
+    /// Type this character directly (used when no Mac key produces it).
+    Text(char),
 }
 
 /// Kind of physical (Windows-keyboard) modifier.
@@ -247,12 +274,13 @@ pub struct Injector {
     bounds: Rect,
     last_click: Option<Click>,
     scroll_rem: (f64, f64),
+    /// Layout of the Windows keyboard, from settings or reported by kvm-win.
+    win_layout: Option<WinLayout>,
 }
 
 impl Injector {
     pub fn new(s: Settings) -> Self {
         Injector {
-            s,
             phys: Vec::new(),
             sent_mods: Vec::new(),
             keys_down: Vec::new(),
@@ -264,7 +292,17 @@ impl Injector {
             bounds: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             last_click: None,
             scroll_rem: (0.0, 0.0),
+            win_layout: match s.layout {
+                LayoutMode::Fixed(l) => Some(l),
+                _ => None,
+            },
+            s,
         }
+    }
+
+    /// The Windows layout symbols are being translated from, if any.
+    pub fn win_layout(&self) -> Option<WinLayout> {
+        self.win_layout
     }
 
     /// Call when control arrives, with the real pointer position and the screen area.
@@ -291,6 +329,12 @@ impl Injector {
             Msg::Button { button: b, down } => self.button(b, down, now_ms),
             Msg::Scroll { dx, dy } => self.scroll(dx, dy),
             Msg::Leave => self.release_all(),
+            Msg::Layout(hkl) => {
+                if self.s.layout == LayoutMode::Auto {
+                    self.win_layout = WinLayout::from_hkl(hkl);
+                }
+                Vec::new()
+            }
             Msg::Enter | Msg::Hello { .. } | Msg::Heartbeat => Vec::new(),
         }
     }
@@ -424,6 +468,13 @@ impl Injector {
             return self.plain_key(code, false);
         }
 
+        if let Some(out) = self.translate(h, ctx) {
+            if !self.tapped.contains(&h) {
+                self.tapped.push(h);
+            }
+            return out;
+        }
+
         // Key press: decide what the held modifiers mean for this chord.
         let mut out = Vec::new();
         let mut keyout = KeyOut::Normal;
@@ -450,6 +501,63 @@ impl Injector {
             }
         }
         out
+    }
+
+    /// Symbol keys when the layouts differ: find the character the Windows keyboard
+    /// means and type it with whichever Mac key produces it (adjusting Shift/Option),
+    /// or as text if no key does. None = send the key as it is.
+    fn translate(&mut self, h: u16, ctx: &mut dyn Ctx) -> Option<Vec<Out>> {
+        let layout = self.win_layout?;
+        // Shortcuts (Ctrl/Alt/Win held) stay positional.
+        if self.phys.iter().any(|p| p.kind != Phys::Shift) {
+            return None;
+        }
+        let shift = self.holding(Phys::Shift);
+        let ch = layout.char_for(h, shift)?;
+        let natural = keymap::hid_to_mac(h);
+        match ctx.keystroke_for(ch) {
+            // The Mac would type the same thing anyway: send it normally.
+            Some((code, sh, false)) if Some(code) == natural && sh == shift => None,
+            Some((code, sh, opt)) => Some(self.tap_with(code, sh, opt)),
+            None => Some(vec![Out::Text(ch)]),
+        }
+    }
+
+    /// Press and release `code` with exactly the given Shift/Option state, then put
+    /// the held modifiers back.
+    fn tap_with(&mut self, code: u16, shift: bool, option: bool) -> Vec<Out> {
+        let mut v = Vec::new();
+        let held_shift: Vec<u16> =
+            self.sent_mods.iter().copied().filter(|&c| c == mac::SHIFT || c == mac::RIGHT_SHIFT).collect();
+        let mut added = Vec::new();
+        // Release Shift if this key must be typed without it.
+        if !shift {
+            for &c in &held_shift {
+                self.sent_mods.retain(|&s| s != c);
+                v.push(Out::Key { code: c, down: false, flags: self.flags(), modifier: true, autorepeat: false });
+            }
+        }
+        for (need, c) in [(shift && held_shift.is_empty(), mac::SHIFT), (option, mac::OPTION)] {
+            if need && !self.sent_mods.contains(&c) {
+                self.sent_mods.push(c);
+                added.push(c);
+                v.push(Out::Key { code: c, down: true, flags: self.flags(), modifier: true, autorepeat: false });
+            }
+        }
+        let flags = self.flags_for(code);
+        v.push(Out::Key { code, down: true, flags, modifier: false, autorepeat: false });
+        v.push(Out::Key { code, down: false, flags, modifier: false, autorepeat: false });
+        for c in added.into_iter().rev() {
+            self.sent_mods.retain(|&s| s != c);
+            v.push(Out::Key { code: c, down: false, flags: self.flags(), modifier: true, autorepeat: false });
+        }
+        if !shift {
+            for c in held_shift {
+                self.sent_mods.push(c);
+                v.push(Out::Key { code: c, down: true, flags: self.flags(), modifier: true, autorepeat: false });
+            }
+        }
+        v
     }
 
     /// The Windows-style shortcut rules (see the module docs).
@@ -672,6 +780,115 @@ mod tests {
             self.asked_selection += 1;
             self.selection
         }
+        fn keystroke_for(&mut self, ch: char) -> Option<(u16, bool, bool)> {
+            jis(ch)
+        }
+    }
+
+    /// A Mac with a Japanese (JIS) keyboard layout: some of its symbol keys.
+    struct JisMac;
+
+    fn jis(ch: char) -> Option<(u16, bool, bool)> {
+        Some(match ch {
+            '2' => (0x13, false, false),
+            '"' => (0x13, true, false),  // Shift+2
+            '-' => (0x1B, false, false),
+            '_' => (0x5E, true, false),  // Shift+ろ
+            ';' => (0x29, false, false),
+            ':' => (0x27, false, false), // own key, no Shift
+            '@' => (0x21, false, false), // own key right of P
+            '\\' => (0x5D, true, false), // Option+¥ on a real Mac; simplified
+            _ => return None,
+        })
+    }
+
+    impl Ctx for JisMac {
+        fn front_is_terminal(&mut self) -> bool {
+            false
+        }
+        fn has_selection(&mut self) -> bool {
+            false
+        }
+        fn keystroke_for(&mut self, ch: char) -> Option<(u16, bool, bool)> {
+            jis(ch)
+        }
+    }
+
+    fn uk_on_jis() -> Injector {
+        let mut i = inj();
+        i.handle(Msg::Layout(0x0809_0809), 0, &mut JisMac);
+        assert_eq!(i.win_layout(), Some(WinLayout::Uk));
+        i
+    }
+
+    #[test]
+    fn uk_underscore_on_jis_mac() {
+        let mut i = uk_on_jis();
+        let c = &mut JisMac;
+        press(&mut i, hid::LEFT_SHIFT, c);
+        // Shift + (UK minus key) means '_' -> JIS Shift+ろ.
+        let o = press(&mut i, 0x2D, c);
+        assert_eq!(keys(&o), vec![(0x5E, true), (0x5E, false)]);
+        assert!(key_out(&o[0]).2 & flag::SHIFT != 0);
+        assert!(release(&mut i, 0x2D, c).is_empty());
+    }
+
+    #[test]
+    fn uk_colon_on_jis_mac_releases_shift_around_it() {
+        let mut i = uk_on_jis();
+        let c = &mut JisMac;
+        press(&mut i, hid::LEFT_SHIFT, c);
+        let o = press(&mut i, 0x33, c); // Shift+; = ':'
+        assert_eq!(keys(&o), vec![(mac::SHIFT, false), (0x27, true), (0x27, false), (mac::SHIFT, true)]);
+        assert_eq!(key_out(&o[1]).2 & flag::SHIFT, 0);
+        // Shift still held afterwards; releasing it works normally.
+        assert_eq!(keys(&release(&mut i, hid::LEFT_SHIFT, c)), vec![(mac::SHIFT, false)]);
+    }
+
+    #[test]
+    fn uk_at_and_quote_on_jis_mac() {
+        let mut i = uk_on_jis();
+        let c = &mut JisMac;
+        press(&mut i, hid::LEFT_SHIFT, c);
+        // Shift+' = '@' on UK -> JIS '@' key, without Shift.
+        assert_eq!(keys(&press(&mut i, 0x34, c))[1], (0x21, true));
+        release(&mut i, 0x34, c);
+        // Shift+2 = '"' on UK and on JIS: same key, sent normally (held, repeatable).
+        assert_eq!(keys(&press(&mut i, 0x1F, c)), vec![(0x13, true)]);
+        assert_eq!(keys(&release(&mut i, 0x1F, c)), vec![(0x13, false)]);
+    }
+
+    #[test]
+    fn unknown_char_is_typed_as_text() {
+        let mut i = uk_on_jis();
+        let c = &mut JisMac;
+        press(&mut i, hid::LEFT_SHIFT, c);
+        assert_eq!(press(&mut i, 0x20, c), vec![Out::Text('£')]);
+        assert!(release(&mut i, 0x20, c).is_empty());
+    }
+
+    #[test]
+    fn shortcuts_and_letters_are_not_translated() {
+        let mut i = uk_on_jis();
+        let c = &mut JisMac;
+        // Letters stay positional.
+        assert_eq!(keys(&press(&mut i, 0x04, c)), vec![(0x00, true)]);
+        release(&mut i, 0x04, c);
+        // Ctrl+Shift+- stays positional (zoom out etc.).
+        press(&mut i, hid::LEFT_CTRL, c);
+        press(&mut i, hid::LEFT_SHIFT, c);
+        assert_eq!(keys(&press(&mut i, 0x2D, c)), vec![(0x1B, true)]);
+    }
+
+    #[test]
+    fn layout_off_and_unknown_layouts_send_positions() {
+        let mut i = Injector::new(Settings { layout: LayoutMode::Off, ..Default::default() });
+        i.handle(Msg::Layout(0x0809_0809), 0, &mut JisMac);
+        assert_eq!(i.win_layout(), None);
+        let mut i = inj();
+        i.handle(Msg::Layout(0x0411_0411), 0, &mut JisMac); // Japanese Windows keyboard
+        assert_eq!(i.win_layout(), None);
+        assert_eq!(keys(&press(&mut i, 0x2D, &mut JisMac)), vec![(0x1B, true)]);
     }
 
     fn term(selection: bool) -> Fake {

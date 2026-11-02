@@ -115,6 +115,19 @@ Tabby) it works like Windows Terminal:
 If Ctrl+C ever stops the program when you meant to copy, use **Ctrl+Shift+C**, which
 always copies.
 
+### Different keyboard layouts (e.g. UK Windows keyboard, Japanese Mac)
+
+Symbols are typed **as printed on the Windows keyboard**, whatever layout the Mac
+uses. kvm-win tells the Mac its keyboard layout (UK and US are supported). For each
+symbol key, the Mac then finds the key on its own layout that types the same
+character. On a Japanese Mac, UK Shift+- gives `_`, Shift+; gives `:`, and Shift+'
+gives `@`. A character the Mac layout has no key for (such as `£` on JIS) is typed
+directly. Letters and shortcuts (Ctrl/Alt/Win held) are not changed, so Japanese
+romaji input works as usual.
+
+To override the detected layout on the Mac, use `--layout uk`, `--layout us`, or
+`--layout off` (send key positions unchanged).
+
 Run the Mac app with `--no-swap` to turn all of this off and send keys exactly as they
 are. With a Japanese keyboard add `--jis`: the 英数 (Caps) key selects 英数 and
 半角/全角 toggles 英数/かな.

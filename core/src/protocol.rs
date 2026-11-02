@@ -8,6 +8,7 @@
 //! | 0x01 | Hello      | magic "KVMB" + version (u8)  |
 //! | 0x02 | Enter      | –                            |
 //! | 0x03 | Leave      | –                            |
+//! | 0x04 | Layout     | Windows keyboard HKL (u32)   |
 //! | 0x10 | KeyDown    | HID usage (u16)              |
 //! | 0x11 | KeyUp      | HID usage (u16)              |
 //! | 0x20 | MouseMove  | dx (i16), dy (i16)           |
@@ -18,7 +19,7 @@
 use std::io::{self, Read, Write};
 
 pub const MAGIC: [u8; 4] = *b"KVMB";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 /// Mouse buttons on the wire.
 pub mod button {
@@ -41,6 +42,8 @@ pub enum Msg {
     Enter,
     /// Control has moved back to Windows; the Mac must release everything it holds.
     Leave,
+    /// The Windows keyboard layout (HKL from GetKeyboardLayout), sent before Enter.
+    Layout(u32),
     KeyDown(u16),
     KeyUp(u16),
     MouseMove { dx: i16, dy: i16 },
@@ -65,6 +68,10 @@ impl Msg {
             }
             Msg::Enter => out.push(0x02),
             Msg::Leave => out.push(0x03),
+            Msg::Layout(hkl) => {
+                out.push(0x04);
+                out.extend_from_slice(&hkl.to_be_bytes());
+            }
             Msg::KeyDown(hid) => {
                 out.push(0x10);
                 out.extend_from_slice(&hid.to_be_bytes());
@@ -112,6 +119,11 @@ impl Msg {
             }
             0x02 => Msg::Enter,
             0x03 => Msg::Leave,
+            0x04 => {
+                let mut b = [0u8; 4];
+                r.read_exact(&mut b)?;
+                Msg::Layout(u32::from_be_bytes(b))
+            }
             0x10 => Msg::KeyDown(read_u16(r)?),
             0x11 => Msg::KeyUp(read_u16(r)?),
             0x20 => Msg::MouseMove { dx: read_i16(r)?, dy: read_i16(r)? },
@@ -157,6 +169,7 @@ mod tests {
             Msg::hello(),
             Msg::Enter,
             Msg::Leave,
+            Msg::Layout(0x0809_0809),
             Msg::KeyDown(0x04),
             Msg::KeyUp(0xE3),
             Msg::MouseMove { dx: -300, dy: 17 },

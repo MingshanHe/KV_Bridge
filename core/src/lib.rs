@@ -6,6 +6,7 @@
 //!   and when the Logitech Lift button / hotkey switches control.
 
 pub mod keymap;
+pub mod layout;
 pub mod protocol;
 pub mod router;
 

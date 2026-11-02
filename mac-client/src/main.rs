@@ -31,6 +31,9 @@ OPTIONS:
                           Windows-style shortcuts (Alt+Tab, terminal Ctrl+C...)
     --invert-scroll       Reverse the scroll direction
     --scroll-speed <PX>   Pixels per wheel notch (default 40)
+    --layout <L>          Windows keyboard layout for symbol keys:
+                          auto (default, as reported by Windows), uk, us,
+                          or off (send key positions as they are)
     --jis                 Japanese keyboard: 英数/Caps -> Eisu, 半角/全角 toggles Eisu/Kana
     --verbose             Print every message received
     --test-type           Type a test sentence here after 3 s, then exit
@@ -61,6 +64,17 @@ fn parse_args() -> Result<Options, String> {
                 o.settings.scroll_px_per_notch = v;
             }
             "--jis" => o.settings.jis = true,
+            "--layout" => {
+                use kvm_core::layout::WinLayout;
+                use state::LayoutMode;
+                o.settings.layout = match value("--layout")?.as_str() {
+                    "auto" => LayoutMode::Auto,
+                    "uk" => LayoutMode::Fixed(WinLayout::Uk),
+                    "us" => LayoutMode::Fixed(WinLayout::Us),
+                    "off" => LayoutMode::Off,
+                    other => return Err(format!("unknown layout '{other}' (auto, uk, us, off)")),
+                }
+            }
             "--verbose" => o.verbose = true,
             "--test-type" => o.test_type = true,
             "-h" | "--help" => {

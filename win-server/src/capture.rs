@@ -1,139 +1,145 @@
-//! Hooks, network and status output for kvm-win.
-//!
-//! Threads:
-//! * main  – installs the low-level hooks and pumps messages. Hook callbacks only lock
-//!   the router briefly and push to channels; they never print or touch the
-//!   network, because Windows silently removes hooks that respond too slowly.
-//! * net   – accepts the Mac, writes forwarded input, sends heartbeats.
-//! * ui    – prints status, beeps, sets the console title.
+//! Keyboard and mouse capture on Windows: low-level hooks, the switching router, and
+//! cursor parking. Hook callbacks only lock the router briefly and push to channels;
+//! they never block, because Windows silently removes hooks that respond too slowly.
 
 use crate::ffi::*;
-use crate::Options;
 use kvm_core::keymap::win_to_hid;
 use kvm_core::protocol::{button, Msg};
 use kvm_core::router::{Config, Input, Notice, Router};
-use std::io::Write;
-use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::net::UdpSocket;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
 
 static ROUTER: OnceLock<Mutex<Router>> = OnceLock::new();
 static NET_TX: OnceLock<Sender<Msg>> = OnceLock::new();
-static UI_TX: OnceLock<Sender<Ui>> = OnceLock::new();
+static UI_TX: OnceLock<Sender<Event>> = OnceLock::new();
 static LOG_KEYS: AtomicBool = AtomicBool::new(false);
 
-const HEARTBEAT: Duration = Duration::from_secs(1);
-const PEER_TIMEOUT: Duration = Duration::from_secs(3);
-
-enum Ui {
+/// What capture reports to the app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
     Notice(Notice),
-    Line(String),
+    Log(String),
+}
+
+/// Channels from a running capture.
+pub struct Capture {
+    /// Messages to send to the Mac.
+    pub outgoing: Receiver<Msg>,
+    /// Switches and log lines.
+    pub events: Receiver<Event>,
 }
 
 fn ui(line: String) {
     if let Some(tx) = UI_TX.get() {
-        let _ = tx.send(Ui::Line(line));
+        let _ = tx.send(Event::Log(line));
+    }
+}
+
+fn notify(n: Notice) {
+    if let Some(tx) = UI_TX.get() {
+        let _ = tx.send(Event::Notice(n));
     }
 }
 
 fn router() -> std::sync::MutexGuard<'static, Router> {
     // A panic while holding the lock must not kill input handling for good.
-    ROUTER.get().expect("router initialised").lock().unwrap_or_else(|e| e.into_inner())
+    ROUTER.get().expect("capture started").lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn run(opts: Options) {
+/// Install the hooks (on their own thread) and start routing. Call once per process;
+/// later calls return None.
+pub fn start(cfg: Config) -> Option<Capture> {
+    if ROUTER.set(Mutex::new(Router::new(cfg))).is_err() {
+        return None;
+    }
     // Without this, a laptop running at 125%/150% display scaling gives us scaled
-    // coordinates from GetCursorPos/SetCursorPos but real pixels in the mouse hook,
-    // and the mismatch looks like a huge movement on every event (the Mac cursor
-    // flies into a corner). Being DPI-aware makes every API use real pixels.
+    // coordinates from GetCursorPos/SetCursorPos but real pixels in the mouse hook.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    LOG_KEYS.store(opts.log_keys, Ordering::Relaxed);
-    let _ = ROUTER.set(Mutex::new(Router::new(Config {
-        toggle_button: opts.toggle_button,
-        hotkey: opts.hotkey,
-    })));
-
-    let (net_tx, net_rx) = channel::<Msg>();
-    let (ui_tx, ui_rx) = channel::<Ui>();
+    let (net_tx, outgoing) = channel::<Msg>();
+    let (ui_tx, events) = channel::<Event>();
     let _ = NET_TX.set(net_tx);
     let _ = UI_TX.set(ui_tx);
 
-    let quiet = opts.quiet;
-    thread::spawn(move || ui_thread(ui_rx, quiet));
+    thread::Builder::new()
+        .name("input-hooks".into())
+        .spawn(|| unsafe {
+            let hmod = GetModuleHandleW(std::ptr::null());
+            let kb = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0);
+            let ms = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0);
+            if kb.is_null() || ms.is_null() {
+                ui(format!("could not install input hooks (code {})", GetLastError()));
+                return;
+            }
+            // Low-level hooks are delivered through this thread's message loop.
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            UnhookWindowsHookEx(kb);
+            UnhookWindowsHookEx(ms);
+        })
+        .ok()?;
+    Some(Capture { outgoing, events })
+}
 
-    let listener = match TcpListener::bind(("0.0.0.0", opts.port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot listen on port {}: {e}", opts.port);
-            std::process::exit(1);
-        }
-    };
-    print_banner(&opts);
-    let allow = opts.allow;
-    thread::spawn(move || net_thread(listener, allow, net_rx));
+/// Change the toggle button / hotkey while running.
+pub fn set_config(cfg: Config) {
+    router().set_config(cfg);
+}
 
-    unsafe {
-        let hmod = GetModuleHandleW(std::ptr::null());
-        let kb = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0);
-        let ms = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0);
-        if kb.is_null() || ms.is_null() {
-            eprintln!("error: could not install input hooks (code {})", GetLastError());
-            std::process::exit(1);
-        }
+/// Log every key and button event (for testing).
+pub fn set_logging(on: bool) {
+    LOG_KEYS.store(on, Ordering::Relaxed);
+}
 
-        // Low-level hooks are delivered through this thread's message loop.
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        UnhookWindowsHookEx(kb);
-        UnhookWindowsHookEx(ms);
+/// Tell capture whether a Mac is connected. Losing it while the Mac has control hands
+/// control back to Windows.
+pub fn set_connected(connected: bool) {
+    let n = router().set_connected(connected);
+    if let Some(n) = n {
+        unpark_cursor();
+        notify(n);
     }
 }
 
-fn print_banner(opts: &Options) {
-    let ip = local_ip().unwrap_or_else(|| "<this PC's IP>".into());
-    let switch = match (opts.toggle_button, opts.hotkey) {
-        (Some(b), true) => format!("{} thumb button or Ctrl+Alt+M", button_name(b)),
-        (Some(b), false) => format!("{} thumb button", button_name(b)),
-        (None, _) => "Ctrl+Alt+M".into(),
-    };
-    println!("kvm-win {}", env!("CARGO_PKG_VERSION"));
-    println!("Listening on port {}.", opts.port);
-    println!("On the Mac, run:   ./kvm-mac {ip}");
-    println!("Switch control:    {switch}");
-    println!("Stop:              close this window or press Ctrl+C here (control returns to Windows)");
-    println!();
-    set_title("kvm-win — waiting for Mac");
+/// Whether the Mac currently has control.
+pub fn is_remote() -> bool {
+    router().mode() == kvm_core::router::Mode::Remote
 }
 
-fn button_name(b: u8) -> &'static str {
-    match b {
-        button::BACK => "Back",
-        button::FORWARD => "Forward",
-        _ => "?",
-    }
-}
-
-/// The address the Mac should connect to. Connecting a UDP socket sends no packets;
-/// it just asks the OS which local interface would be used.
-fn local_ip() -> Option<String> {
+/// This PC's LAN address. Connecting a UDP socket sends no packets; it just asks the
+/// OS which local interface would be used.
+pub fn local_ip() -> Option<String> {
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
     Some(s.local_addr().ok()?.ip().to_string())
 }
 
-fn set_title(t: &str) {
-    let w = wide(t);
+/// The standard sound for a switch.
+pub fn beep(n: &Notice) {
+    let kind = match n {
+        Notice::EnteredRemote => MB_ICONASTERISK,
+        Notice::LeftRemote => MB_OK,
+        Notice::NotConnected => MB_ICONHAND,
+        Notice::Unmapped(_) => return,
+    };
     unsafe {
-        SetConsoleTitleW(w.as_ptr());
+        MessageBeep(kind);
+    }
+}
+
+pub fn button_name(b: u8) -> &'static str {
+    match b {
+        button::BACK => "Back",
+        button::FORWARD => "Forward",
+        _ => "?",
     }
 }
 
@@ -221,8 +227,8 @@ fn route(input: Input) -> bool {
             let _ = tx.send(m);
         }
     }
-    if let (Some(n), Some(tx)) = (decision.notice, UI_TX.get()) {
-        let _ = tx.send(Ui::Notice(n));
+    if let Some(n) = decision.notice {
+        notify(n);
     }
     decision.block
 }
@@ -323,122 +329,3 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
 
-fn net_thread(listener: TcpListener, allow: Option<std::net::IpAddr>, rx: Receiver<Msg>) {
-    for incoming in listener.incoming() {
-        let stream = match incoming {
-            Ok(s) => s,
-            Err(e) => {
-                ui(format!("accept failed: {e}"));
-                continue;
-            }
-        };
-        let peer = match stream.peer_addr() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if let Some(ip) = allow {
-            if peer.ip() != ip {
-                ui(format!("rejected connection from {} (not --allow {ip})", peer.ip()));
-                continue;
-            }
-        }
-        ui(format!("Mac connected from {}", peer.ip()));
-        set_title("kvm-win — Mac connected (controlling Windows)");
-        serve(stream, &rx);
-        if let Some(n) = router().set_connected(false) {
-            unpark_cursor();
-            if let Some(tx) = UI_TX.get() {
-                let _ = tx.send(Ui::Notice(n));
-            }
-        }
-        ui("Mac disconnected; waiting for it to reconnect".into());
-        set_title("kvm-win — waiting for Mac");
-    }
-}
-
-fn serve(mut stream: TcpStream, rx: &Receiver<Msg>) {
-    let _ = stream.set_nodelay(true);
-    // Drop anything queued while no Mac was attached.
-    while rx.try_recv().is_ok() {}
-
-    let alive = Arc::new(AtomicBool::new(true));
-    // Reader: the Mac sends heartbeats; silence means it's gone (sleep, Wi-Fi drop),
-    // which a writer alone could take minutes to notice.
-    if let Ok(mut rs) = stream.try_clone() {
-        let alive = alive.clone();
-        let _ = rs.set_read_timeout(Some(PEER_TIMEOUT));
-        thread::spawn(move || {
-            loop {
-                match Msg::read_from(&mut rs) {
-                    Ok(Msg::Hello { version }) if version != kvm_core::protocol::VERSION => {
-                        ui(format!(
-                            "Mac app is protocol v{version}, this is v{}; update both",
-                            kvm_core::protocol::VERSION
-                        ));
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            alive.store(false, Ordering::Relaxed);
-            let _ = rs.shutdown(Shutdown::Both);
-        });
-    }
-
-    if Msg::hello().write_to(&mut stream).is_err() {
-        return;
-    }
-    router().set_connected(true);
-
-    let mut buf = Vec::with_capacity(256);
-    while alive.load(Ordering::Relaxed) {
-        buf.clear();
-        match rx.recv_timeout(HEARTBEAT) {
-            Ok(m) => {
-                m.encode(&mut buf);
-                // Batch whatever else is already queued into one write.
-                while let Ok(m) = rx.try_recv() {
-                    m.encode(&mut buf);
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => Msg::Heartbeat.encode(&mut buf),
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-        if stream.write_all(&buf).is_err() {
-            break;
-        }
-    }
-    let _ = stream.shutdown(Shutdown::Both);
-}
-
-fn ui_thread(rx: Receiver<Ui>, quiet: bool) {
-    for ev in rx {
-        match ev {
-            Ui::Line(s) => println!("{s}"),
-            Ui::Notice(n) => match n {
-                Notice::EnteredRemote => {
-                    println!(">>> Controlling the MAC");
-                    set_title("kvm-win — controlling MAC");
-                    if !quiet {
-                        unsafe { MessageBeep(MB_ICONASTERISK) };
-                    }
-                }
-                Notice::LeftRemote => {
-                    println!("<<< Controlling WINDOWS");
-                    set_title("kvm-win — Mac connected (controlling Windows)");
-                    if !quiet {
-                        unsafe { MessageBeep(MB_OK) };
-                    }
-                }
-                Notice::NotConnected => {
-                    println!("No Mac connected yet; staying on Windows");
-                    if !quiet {
-                        unsafe { MessageBeep(MB_ICONHAND) };
-                    }
-                }
-                Notice::Unmapped(id) => println!("(key 0x{id:x} has no Mac equivalent; ignored)"),
-            },
-        }
-    }
-}

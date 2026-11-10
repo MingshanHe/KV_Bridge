@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "kvm_mac"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kvm-mac"
 path = "src/main.rs"

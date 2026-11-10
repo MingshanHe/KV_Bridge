@@ -1,125 +1,63 @@
-//! Network loop and CoreGraphics event posting for kvm-mac.
+//! macOS side: posting CoreGraphics events, the Accessibility-based context for the
+//! shortcut rules, and [`Output`], which turns protocol messages into input on this Mac.
 
 use crate::ffi::*;
-use crate::state::{Ctx, Injector, MouseKind, NoCtx, Out, Rect};
-use crate::Options;
-use kvm_core::protocol::{Msg, VERSION};
-use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use crate::state::{flag, Ctx, Injector, MouseKind, Out, Rect, Settings};
+use kvm_core::protocol::Msg;
+use std::ffi::c_void;
 use std::process::{Child, Command, Stdio};
 use std::ptr::null_mut;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-const HEARTBEAT: Duration = Duration::from_secs(1);
-const PEER_TIMEOUT: Duration = Duration::from_secs(3);
-const RETRY: Duration = Duration::from_secs(2);
-
-pub fn run(opts: Options) {
-    if !accessibility_ok() {
-        eprintln!(
-            "kvm-mac needs the Accessibility permission to type and click.\n\
-             System Settings has been asked to show the prompt. Then:\n  \
-             System Settings > Privacy & Security > Accessibility\n  \
-             turn on the app you ran this from (e.g. Terminal), then run kvm-mac again."
-        );
-        std::process::exit(1);
-    }
-
-    let poster = Poster::new();
-    let start = Instant::now();
-    let now_ms = move || start.elapsed().as_millis() as u64;
-
-    if opts.test_type {
-        test_type(&poster);
-        return;
-    }
-
-    let host = opts.host.clone().expect("host checked in parse_args");
-    let addr = match resolve(&host, opts.port) {
-        Some(a) => a,
-        None => {
-            eprintln!("error: cannot resolve '{host}'");
-            std::process::exit(2);
-        }
-    };
-
-    println!("kvm-mac {}", env!("CARGO_PKG_VERSION"));
-    let mut inj = Injector::new(opts.settings.clone());
-    let mut ctx = MacCtx::new(opts.verbose);
-    loop {
-        println!("Connecting to {addr} ...");
-        match TcpStream::connect_timeout(&addr, PEER_TIMEOUT) {
-            Ok(stream) => {
-                println!("Connected. Press the Lift button on Windows to control this Mac.");
-                let reason = session(stream, &mut inj, &mut ctx, &poster, opts.verbose, &now_ms);
-                for o in inj.release_all() {
-                    poster.post(&o);
-                }
-                println!("Disconnected: {reason}");
-            }
-            Err(e) => println!("Not reachable ({e}). Is kvm-win running? Retrying..."),
-        }
-        thread::sleep(RETRY);
-    }
+/// What [`Output`] reports while it works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// Control arrived. `layout` names the Windows layout symbols are translated from.
+    Entered { layout: Option<&'static str> },
+    /// Control went back to Windows.
+    Left,
 }
 
-fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
-    (host, port).to_socket_addrs().ok()?.find(|a| a.is_ipv4()).or_else(|| {
-        (host, port).to_socket_addrs().ok()?.next()
-    })
-}
-
-fn session(
-    mut stream: TcpStream,
-    inj: &mut Injector,
-    ctx: &mut MacCtx,
-    poster: &Poster,
+/// Replays protocol messages as input on this Mac. Create it on the thread that
+/// will use it (it holds CoreGraphics and Accessibility objects).
+pub struct Output {
+    inj: Injector,
+    ctx: MacCtx,
+    poster: Poster,
+    awake: Option<Child>,
+    start: Instant,
     verbose: bool,
-    now_ms: &dyn Fn() -> u64,
-) -> String {
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(PEER_TIMEOUT));
-    if let Err(e) = Msg::hello().write_to(&mut stream) {
-        return e.to_string();
-    }
+}
 
-    // Heartbeats let Windows notice quickly if this Mac sleeps or drops off Wi-Fi.
-    if let Ok(mut ws) = stream.try_clone() {
-        thread::spawn(move || loop {
-            thread::sleep(HEARTBEAT);
-            if Msg::Heartbeat.write_to(&mut ws).is_err() {
-                break;
-            }
-        });
-    }
-
-    match Msg::read_from(&mut stream) {
-        Ok(Msg::Hello { version }) if version == VERSION => {}
-        Ok(Msg::Hello { version }) => {
-            let _ = stream.shutdown(Shutdown::Both);
-            return format!("kvm-win speaks protocol v{version}, this is v{VERSION}; update both");
+impl Output {
+    pub fn new(settings: Settings, verbose: bool) -> Self {
+        Output {
+            inj: Injector::new(settings),
+            ctx: MacCtx::new(verbose),
+            poster: Poster::new(),
+            awake: None,
+            start: Instant::now(),
+            verbose,
         }
-        Ok(other) => return format!("unexpected first message {other:?}"),
-        Err(e) => return e.to_string(),
     }
 
-    let mut awake: Option<Child> = None;
-    let reason = loop {
-        let msg = match Msg::read_from(&mut stream) {
-            Ok(m) => m,
-            Err(e) if is_timeout(&e) => break "no heartbeat from Windows".to_string(),
-            Err(e) => break e.to_string(),
-        };
-        if verbose && msg != Msg::Heartbeat {
+    pub fn set_settings(&mut self, s: Settings) {
+        self.inj.set_settings(s);
+    }
+
+    /// Handle one message; returns an event when control moved.
+    pub fn handle(&mut self, msg: Msg) -> Option<Event> {
+        if self.verbose && msg != Msg::Heartbeat {
             println!("  {msg:?}");
         }
+        let now = self.start.elapsed().as_millis() as u64;
         match msg {
             Msg::Enter => {
                 let bounds = screen_bounds();
                 // Start every session with the cursor visible in the middle of the
                 // main screen, so it's always easy to find.
                 let (x, y) = main_screen_center();
-                if verbose {
+                if self.verbose {
                     let (cx, cy) = cursor_position();
                     println!(
                         "  cursor was at ({cx:.0}, {cy:.0}); moving it to ({x:.0}, {y:.0}). \
@@ -127,41 +65,97 @@ fn session(
                         bounds.w, bounds.h, bounds.x, bounds.y
                     );
                 }
-                inj.sync_pointer(x, y, bounds);
-                poster.show_cursor_at(x, y);
+                self.inj.sync_pointer(x, y, bounds);
+                self.poster.show_cursor_at(x, y);
                 // Keep the display on while it's being driven remotely.
-                awake = keep_awake();
-                println!(">>> Windows keyboard and mouse are controlling this Mac");
-                match inj.win_layout() {
-                    Some(l) => println!("    {} keyboard: symbols are typed as on the Windows keyboard", l.name()),
-                    None => println!("    keyboard layout not translated (keys sent by position)"),
-                }
+                stop(&mut self.awake);
+                self.awake = keep_awake();
+                Some(Event::Entered { layout: self.inj.win_layout().map(|l| l.name()) })
             }
             Msg::Leave => {
-                for o in inj.handle(msg, now_ms(), ctx) {
-                    poster.post(&o);
+                for o in self.inj.handle(msg, now, &mut self.ctx) {
+                    self.poster.post(&o);
                 }
-                stop(&mut awake);
-                println!("<<< Control returned to Windows");
+                stop(&mut self.awake);
+                Some(Event::Left)
             }
             other => {
-                for o in inj.handle(other, now_ms(), ctx) {
-                    poster.post(&o);
+                for o in self.inj.handle(other, now, &mut self.ctx) {
+                    self.poster.post(&o);
                 }
+                None
             }
         }
-    };
-    stop(&mut awake);
-    let _ = stream.shutdown(Shutdown::Both);
-    reason
+    }
+
+    /// The connection ended: release everything held and let the display sleep.
+    pub fn reset(&mut self) {
+        for o in self.inj.release_all() {
+            self.poster.post(&o);
+        }
+        stop(&mut self.awake);
+    }
+
+    /// Post raw events (used by the typing self-test).
+    pub fn post(&self, outs: &[Out]) {
+        for o in outs {
+            self.poster.post(o);
+        }
+    }
 }
 
-fn is_timeout(e: &std::io::Error) -> bool {
+impl Drop for Output {
+    fn drop(&mut self) {
+        self.reset();
+    }
+}
+
+extern "C" {
+    static _dispatch_main_q: u8;
+    fn dispatch_sync_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn pthread_main_np() -> i32;
+}
+
+/// Run `f` on the main thread and wait for its result. Requires the main thread to be
+/// running a run loop (true in the app); on the main thread itself it runs directly.
+pub fn on_main<R, F: FnOnce() -> R>(f: F) -> R {
+    struct Job<F, R> {
+        f: Option<F>,
+        r: Option<R>,
+    }
+    extern "C" fn tramp<R, F: FnOnce() -> R>(p: *mut c_void) {
+        let job = unsafe { &mut *(p as *mut Job<F, R>) };
+        if let Some(f) = job.f.take() {
+            job.r = Some(f());
+        }
+    }
+    unsafe {
+        if pthread_main_np() != 0 {
+            return f();
+        }
+        let mut job = Job { f: Some(f), r: None };
+        dispatch_sync_f(
+            &_dispatch_main_q as *const u8 as *const c_void,
+            &mut job as *mut Job<F, R> as *mut c_void,
+            tramp::<R, F>,
+        );
+        job.r.expect("main-thread job ran")
+    }
+}
+
+/// Open System Settings at Privacy & Security > Accessibility.
+pub fn open_accessibility_settings() {
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
+pub fn is_timeout(e: &std::io::Error) -> bool {
     matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
 }
 
 /// `caffeinate` exits on its own if this process dies (-w).
-fn keep_awake() -> Option<Child> {
+pub fn keep_awake() -> Option<Child> {
     Command::new("caffeinate")
         .args(["-di", "-w", &std::process::id().to_string()])
         .stdout(Stdio::null())
@@ -170,16 +164,20 @@ fn keep_awake() -> Option<Child> {
         .ok()
 }
 
-fn stop(c: &mut Option<Child>) {
+pub fn stop(c: &mut Option<Child>) {
     if let Some(mut child) = c.take() {
         let _ = child.kill();
         let _ = child.wait();
     }
 }
 
-/// Checks the Accessibility permission; when missing, macOS shows its own prompt.
-fn accessibility_ok() -> bool {
+/// Checks the Accessibility permission. With `prompt`, macOS shows its own dialog
+/// when it is missing.
+pub fn accessibility_ok(prompt: bool) -> bool {
     unsafe {
+        if !prompt {
+            return AXIsProcessTrustedWithOptions(std::ptr::null()) != 0;
+        }
         let keys = [kAXTrustedCheckOptionPrompt];
         let values = [kCFBooleanTrue];
         let opts = CFDictionaryCreate(
@@ -198,7 +196,7 @@ fn accessibility_ok() -> bool {
     }
 }
 
-fn cursor_position() -> (f64, f64) {
+pub fn cursor_position() -> (f64, f64) {
     unsafe {
         let e = CGEventCreate(null_mut());
         if e.is_null() {
@@ -211,7 +209,7 @@ fn cursor_position() -> (f64, f64) {
 }
 
 /// The area covered by all active displays (global coordinates, top-left origin).
-fn screen_bounds() -> Rect {
+pub fn screen_bounds() -> Rect {
     let mut ids = [0u32; 16];
     let mut n = 0u32;
     let ok = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) } == 0;
@@ -246,7 +244,7 @@ const TERMINALS: &[&str] = &[
 
 /// Answers the shortcut rules' questions using the Accessibility API
 /// (the same permission kvm-mac already needs to type).
-struct MacCtx {
+pub struct MacCtx {
     system: AXUIElementRef,
     attr_focused_app: CFStringRef,
     attr_focused_element: CFStringRef,
@@ -274,6 +272,11 @@ fn skip_keycode(k: u16) -> bool {
 
 impl KeyMap {
     fn refresh(&mut self) {
+        // Text Input Source calls must run on the main thread.
+        on_main(|| self.refresh_now())
+    }
+
+    fn refresh_now(&mut self) {
         unsafe {
             let mut src = TISCopyCurrentKeyboardLayoutInputSource();
             let mut data = if src.is_null() {
@@ -339,7 +342,7 @@ fn cfstr(s: &str) -> CFStringRef {
 }
 
 impl MacCtx {
-    fn new(verbose: bool) -> Self {
+    pub fn new(verbose: bool) -> Self {
         let system = unsafe { AXUIElementCreateSystemWide() };
         if !system.is_null() {
             // Never let a hung app stall our input handling for long.
@@ -441,7 +444,7 @@ impl Ctx for MacCtx {
     }
 }
 
-fn main_screen_center() -> (f64, f64) {
+pub fn main_screen_center() -> (f64, f64) {
     let r = unsafe { CGDisplayBounds(CGMainDisplayID()) };
     if r.size.width < 1.0 || r.size.height < 1.0 {
         return cursor_position();
@@ -449,12 +452,18 @@ fn main_screen_center() -> (f64, f64) {
     (r.origin.x + r.size.width / 2.0, r.origin.y + r.size.height / 2.0)
 }
 
-struct Poster {
+impl Default for Poster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct Poster {
     src: CGEventSourceRef,
 }
 
 impl Poster {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let src = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
         unsafe {
             if !src.is_null() {
@@ -469,7 +478,7 @@ impl Poster {
     }
 
     /// Put the cursor at (x, y), make sure it isn't hidden, and tell apps it moved.
-    fn show_cursor_at(&self, x: f64, y: f64) {
+    pub fn show_cursor_at(&self, x: f64, y: f64) {
         unsafe {
             CGAssociateMouseAndMouseCursorPosition(1);
             CGWarpMouseCursorPosition(CGPoint { x, y });
@@ -483,11 +492,11 @@ impl Poster {
             dx: 0,
             dy: 0,
             clicks: 0,
-            flags: crate::state::flag::NON_COALESCED,
+            flags: flag::NON_COALESCED,
         });
     }
 
-    fn post(&self, out: &Out) {
+    pub fn post(&self, out: &Out) {
         unsafe {
             let e = match *out {
                 Out::Key { code, down, flags, modifier, autorepeat } => {
@@ -535,7 +544,7 @@ impl Poster {
                         if e.is_null() {
                             return;
                         }
-                        CGEventSetFlags(e, crate::state::flag::NON_COALESCED);
+                        CGEventSetFlags(e, flag::NON_COALESCED);
                         CGEventKeyboardSetUnicodeString(e, units.len(), units.as_ptr());
                         CGEventPost(kCGHIDEventTap, e);
                         CFRelease(e as CFTypeRef);
@@ -571,24 +580,3 @@ fn mouse_type(kind: MouseKind, button: u32) -> u32 {
     }
 }
 
-/// Milestone-1 check: types a sentence into whatever app is focused.
-fn test_type(poster: &Poster) {
-    use crate::state::Settings;
-    println!("Click into a text field (e.g. TextEdit). Typing in 3 seconds...");
-    thread::sleep(Duration::from_secs(3));
-    let mut inj = Injector::new(Settings::default());
-    for c in "hello from kvm bridge".chars() {
-        let hid = match c {
-            'a'..='z' => 0x04 + (c as u16 - 'a' as u16),
-            ' ' => 0x2C,
-            _ => continue,
-        };
-        for msg in [Msg::KeyDown(hid), Msg::KeyUp(hid)] {
-            for o in inj.handle(msg, 0, &mut NoCtx) {
-                poster.post(&o);
-            }
-            thread::sleep(Duration::from_millis(15));
-        }
-    }
-    println!("Done. If nothing was typed, check the Accessibility permission.");
-}

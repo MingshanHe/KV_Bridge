@@ -98,6 +98,11 @@ impl Router {
         }
     }
 
+    /// Change the switching settings while running.
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }

@@ -300,6 +300,19 @@ impl Injector {
         }
     }
 
+    /// Change settings while running. A layout already reported by Windows is kept
+    /// when the new mode is still Auto.
+    pub fn set_settings(&mut self, s: Settings) {
+        self.win_layout = match s.layout {
+            LayoutMode::Fixed(l) => Some(l),
+            LayoutMode::Off => None,
+            LayoutMode::Auto => {
+                if self.s.layout == LayoutMode::Auto { self.win_layout } else { None }
+            }
+        };
+        self.s = s;
+    }
+
     /// The Windows layout symbols are being translated from, if any.
     pub fn win_layout(&self) -> Option<WinLayout> {
         self.win_layout

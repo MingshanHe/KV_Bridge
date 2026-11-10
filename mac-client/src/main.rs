@@ -4,10 +4,8 @@
 //! whenever control has been switched to the Mac.
 
 #[cfg(any(target_os = "macos", kvm_check))]
-mod app;
-#[cfg(any(target_os = "macos", kvm_check))]
-mod ffi;
-mod state;
+mod cli;
+use kvm_mac::state;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -104,7 +102,7 @@ fn main() {
         }
     };
     #[cfg(any(target_os = "macos", kvm_check))]
-    app::run(opts);
+    cli::run(opts);
     #[cfg(not(any(target_os = "macos", kvm_check)))]
     {
         let _ = opts;

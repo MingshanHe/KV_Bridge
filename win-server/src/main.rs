@@ -8,9 +8,7 @@ use kvm_core::protocol::button;
 use std::net::IpAddr;
 
 #[cfg(any(windows, kvm_check))]
-mod app;
-#[cfg(any(windows, kvm_check))]
-mod ffi;
+mod cli;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -87,7 +85,7 @@ fn main() {
         }
     };
     #[cfg(any(windows, kvm_check))]
-    app::run(opts);
+    cli::run(opts);
     #[cfg(not(any(windows, kvm_check)))]
     {
         let _ = opts;

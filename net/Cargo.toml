@@ -1,0 +1,14 @@
+[package]
+name = "kvm-net"
+description = "kvm-bridge networking: LAN discovery, code pairing and encrypted sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kvm-core = { path = "../core" }
+snow = "0.9"
+spake2 = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+mdns-sd = "~0.13"

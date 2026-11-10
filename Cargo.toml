@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "win-server", "mac-client"]
+members = ["core", "net", "win-server", "mac-client"]
 resolver = "2"
 
 [workspace.package]

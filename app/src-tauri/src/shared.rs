@@ -31,6 +31,7 @@ pub struct Live {
     pub pairing: Option<(String, Instant)>,
     /// Mac: the current session's connection, so a newer one can replace it.
     pub session: Option<(u64, TcpStream)>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub session_counter: u64,
 }
 

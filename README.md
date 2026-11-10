@@ -1,4 +1,4 @@
-# kvm-bridge
+# KV Bridge
 
 Use the **Windows laptop's keyboard and Logitech Lift mouse to control a Mac**.
 Press the Lift's **Forward** thumb button to send all typing and mouse movement to the
@@ -6,80 +6,63 @@ Mac; press it again to come back to Windows. The monitor stays connected to Wind
 you watch the Mac on its own screen.
 
 ```
- ┌─────────── Windows laptop ───────────┐            ┌──────── Mac ────────┐
- │ keyboard + Lift ─▶ kvm-win           │   TCP      │ kvm-mac ─▶ CGEvent  │
- │   low-level hooks, Lift toggle  ─────┼──────────▶ │  types, clicks,     │
- │   (blocks input while on the Mac)    │  port 24900│  scrolls            │
- └──────────────────────────────────────┘            └─────────────────────┘
+ ┌──────── Windows: KV Bridge ────────┐   same Wi-Fi,   ┌──────── Mac: KV Bridge ────────┐
+ │ keyboard + Lift ─▶ capture         │   encrypted     │ replay keys, mouse, scrolling  │
+ │ Lift button switches control ──────┼───────────────▶ │ Windows shortcuts, UK layout   │
+ │ tray icon, settings window         │                 │ menu-bar icon, settings window │
+ └────────────────────────────────────┘                 └────────────────────────────────┘
 ```
 
-No external dependencies: both apps call the OS APIs directly (Win32 hooks on Windows,
-CoreGraphics on macOS).
+## Install the KV Bridge app
 
-## Get the apps
+Download from the [**Latest build** release](https://github.com/MingshanHe/KV_Bridge/releases/tag/latest):
 
-Every push to `main` publishes both apps to the
-[**Latest build** release](https://github.com/MingshanHe/KV_Bridge/releases/tag/latest):
+- **Windows:** [`KV-Bridge-Setup.exe`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/KV-Bridge-Setup.exe).
+  If Windows shows "Windows protected your PC", click *More info* → *Run anyway*.
+  The first time it runs, allow it on **private networks** when Windows Firewall asks.
+- **Mac:** [`KV-Bridge.dmg`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/KV-Bridge.dmg).
+  Open it and drag **KV Bridge** into **Applications**. The first time, right-click
+  the app → **Open** (it isn't from the App Store). Turn on KV Bridge under
+  *System Settings → Privacy & Security → Accessibility* when asked.
 
-- **Windows:** download
-  [`kvm-win.exe`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-win.exe)
-- **Mac:** download
-  [`kvm-mac.dmg`](https://github.com/MingshanHe/KV_Bridge/releases/download/latest/kvm-mac.dmg),
-  open it, drag the `kvm-mac` folder to your Desktop, and follow *READ ME FIRST*.
-  Or install with one Terminal command (works on Apple Silicon and Intel):
+Both start automatically at login and live in the tray (Windows) / menu bar (Mac).
+Click the icon → *打开 KV Bridge* for the settings window.
 
-  ```sh
-  curl -fsSL https://raw.githubusercontent.com/MingshanHe/KV_Bridge/main/install-mac.sh | bash
-  ```
+### Pair once
 
-  This puts the app in `~/kvm-mac` and clears macOS's download block, so there's
-  nothing to unzip by hand. Run the same command again to update.
+1. On the Mac, click **配对新电脑**. A 6-digit code appears.
+2. On Windows, the Mac shows up under **附近的 Mac**. Click **配对** and type the code.
+   (If it doesn't show up, use *用 IP 地址配对* with the Mac's IP.)
 
-To build yourself, install Rust from <https://rustup.rs> and run
-`cargo build --release -p kvm-win` on Windows or `cargo build --release -p kvm-mac` on the Mac.
+From then on the two computers find each other and connect by themselves whenever
+they're on the same Wi-Fi. Press the Lift's **Forward** button (or Ctrl+Alt+M) to
+switch between them.
 
-## First run
+The connection is encrypted with a key created during pairing. The code itself never
+crosses the network, so it can't be guessed from what's sent.
 
-Both laptops must be on the same network.
+### Settings
 
-### 1. Mac: allow it to type (one time)
+- **Windows:** which Lift button switches, the Ctrl+Alt+M fallback, the switch sound.
+- **Mac:** Windows-style shortcuts, Windows keyboard layout (auto / UK / US / off),
+  scroll speed and direction, Japanese Windows keyboard.
+- **Both:** the computer's name and start at login.
 
-```sh
-~/kvm-mac/kvm-mac --test-type
-```
+## How it's built
 
-macOS will ask for **Accessibility** access for Terminal. Turn it on in
-*System Settings → Privacy & Security → Accessibility*, then run the command again
-and click into TextEdit. It should type `hello from kvm bridge`. If it does, the Mac
-side works.
+| Folder | What |
+|---|---|
+| `core/` | Wire protocol, key tables, switching logic, keyboard layouts |
+| `net/` | LAN discovery (mDNS), pairing (SPAKE2), encrypted sessions (Noise) |
+| `win-server/` | Windows keyboard/mouse capture (library) + the old `kvm-win` CLI |
+| `mac-client/` | Mac input replay (library) + the old `kvm-mac` CLI |
+| `app/` | The KV Bridge app (Tauri): `src-tauri/` Rust, `ui/` settings window |
 
-### 2. Windows: start the sender
+GitHub Actions runs the tests on Linux and builds the Windows installer and the Mac
+dmg on every push; pushes to `main` publish them to the *Latest build* release.
 
-Open PowerShell or Command Prompt in the folder with `kvm-win.exe`:
-
-```
-kvm-win.exe --log
-```
-
-It prints the address to use on the Mac. Allow it through Windows Firewall on
-**Private networks** when asked. With `--log`, press the Lift's thumb buttons and some
-keys: you should see `Forward thumb button` and key lines. (The log is for checking;
-leave `--log` off in normal use.)
-
-### 3. Mac: connect
-
-```sh
-~/kvm-mac/kvm-mac 192.168.x.x        # the address kvm-win printed
-```
-
-Or double-click **Start kvm-mac** in the `kvm-mac` folder in your home folder. It asks
-for the address once and remembers it (`rm ~/.kvm-mac-host` to change it).
-
-### 4. Switch
-
-Press the Lift's **Forward** button. Windows beeps, the console title says
-*controlling MAC*, and your keyboard and mouse now drive the Mac. Press it again to
-return. **Ctrl+Alt+M** does the same as a keyboard fallback.
+The command-line tools (`kvm-win.exe`, `kvm-mac.dmg`) are still published for testing,
+but they don't use pairing or encryption and can't talk to the app.
 
 ## Windows shortcuts on the Mac
 
@@ -125,23 +108,11 @@ gives `@`. A character the Mac layout has no key for (such as `£` on JIS) is ty
 directly. Letters and shortcuts (Ctrl/Alt/Win held) are not changed, so Japanese
 romaji input works as usual.
 
-To override the detected layout on the Mac, use `--layout uk`, `--layout us`, or
-`--layout off` (send key positions unchanged).
+To override the detected layout, change *Windows 键盘布局* in the Mac settings
+(UK, US, or no conversion).
 
-Run the Mac app with `--no-swap` to turn all of this off and send keys exactly as they
-are. With a Japanese keyboard add `--jis`: the 英数 (Caps) key selects 英数 and
+Turn off *使用 Windows 快捷键习惯* in the Mac settings to send keys exactly as they are. With a Japanese Windows keyboard, tick the Japanese keyboard option: the 英数 (Caps) key selects 英数 and
 半角/全角 toggles 英数/かな.
-
-## Options
-
-```
-kvm-win.exe [--port N] [--button forward|back|none] [--no-hotkey]
-            [--allow MAC-IP] [--log] [--quiet]
-
-kvm-mac <WINDOWS-IP> [--port N] [--no-swap] [--invert-scroll]
-                     [--scroll-speed PX] [--jis] [--verbose]
-kvm-mac --test-type
-```
 
 ## Safety behaviour
 
@@ -151,37 +122,53 @@ kvm-mac --test-type
   nothing gets stuck down.
 - The toggle button itself never reaches either machine.
 - The Mac display is kept awake while it's being controlled.
+- Only a paired computer can connect, and everything sent is encrypted.
 
-## Known limits (for now)
+## Known limits
 
-- **Not encrypted.** Keystrokes cross the network in plain text. Use it on your own
-  home network, and consider `--allow <Mac IP>` on Windows. TLS is on the roadmap.
 - Windows doesn't let any app intercept **Ctrl+Alt+Del** or **Win+L**, and input to
-  **administrator windows** (e.g. Task Manager, UAC prompts) can't be captured unless
-  kvm-win is also run as administrator.
-- If Logi Options+ has the Forward button remapped to something else, kvm-win sees
-  the remapped action instead. Set the button back to *Forward* in Options+, or run with
-  `--button back`.
+  **administrator windows** (e.g. Task Manager, UAC prompts) can't be captured.
+- If Logi Options+ has the Forward button remapped to something else, KV Bridge sees
+  the remapped action instead. Set the button back to *Forward* in Options+, or choose
+  the Back button in KV Bridge's settings.
 - Volume and media keys are not forwarded yet.
-- Both apps are console programs; a tray icon (Windows) and menu-bar icon (Mac) are on
-  the roadmap.
+- Without the signing secrets below, the Mac app gets a new signature on every build,
+  and macOS asks for the Accessibility permission again after each update.
 
-## Project layout
+## Mac signing (keeps the Accessibility permission across updates)
+
+The workflow signs the Mac app with a fixed self-signed certificate when these two
+repository secrets exist (*Settings → Secrets and variables → Actions*):
+
+- `MAC_CERT_P12`: the certificate + key as a base64 `.p12`
+- `MAC_CERT_PASSWORD`: its password
+
+Without them it falls back to an ad-hoc signature. Keep the `.p12` private: anyone with
+it could sign an app that macOS would treat as KV Bridge.
+
+## Developing
+
+`cargo test --workspace --exclude kv-bridge` runs the unit tests on any OS. To
+type-check the Windows and Mac code from any OS:
+`RUSTFLAGS="--cfg kvm_check" cargo clippy --workspace --exclude kv-bridge`.
+The app is built with the Tauri CLI: `cd app && npx @tauri-apps/cli@2 build`.
+
+### Command-line tools (older)
 
 ```
-core/         shared: wire protocol, key tables, switching logic (unit tested)
-win-server/   kvm-win: Win32 hooks, network server, status output
-mac-client/   kvm-mac: injection logic (unit tested) + CoreGraphics posting
-.github/      CI: tests on Linux, builds on Windows and macOS runners
-```
+kvm-win.exe [--port N] [--button forward|back|none] [--no-hotkey]
+            [--allow MAC-IP] [--log] [--quiet]
 
-`cargo test --workspace` runs the unit tests anywhere. To type-check the Windows and
-Mac code from any OS: `RUSTFLAGS="--cfg kvm_check" cargo check --workspace`.
+kvm-mac <WINDOWS-IP> [--port N] [--no-swap] [--invert-scroll]
+                     [--scroll-speed PX] [--layout auto|uk|us|off] [--jis] [--verbose]
+kvm-mac --test-type
+```
 
 ## Roadmap
 
-1. ~~Keyboard + mouse forwarding, Lift toggle~~ (this version)
-2. Tray / menu-bar apps with a clear "who has control" indicator, start at login
-3. TLS + pairing code
-4. Clipboard sync
-5. Media keys, hold-to-peek mode (hold the button to use the Mac, release to return)
+1. ~~Keyboard + mouse forwarding, Lift toggle~~
+2. ~~Tray / menu-bar app, start at login, pairing, encryption~~ (this version)
+3. Mac switches to the British keyboard layout automatically while controlled
+4. Shortcut editor with a full "Windows habits" preset (Win+E, Alt+F4, Win+Shift+S …)
+5. Sign in with Google / GitHub to sync settings
+6. Clipboard sync, media keys

@@ -71,6 +71,7 @@ impl Default for MacCfg {
 }
 
 impl WinCfg {
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn router_config(&self) -> kvm_core::router::Config {
         use kvm_core::protocol::button;
         let toggle_button = match self.toggle_button.as_str() {

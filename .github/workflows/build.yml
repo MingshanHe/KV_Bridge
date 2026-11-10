@@ -15,15 +15,85 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup component add clippy
-      - name: Unit tests (protocol, key mapping, switching, Mac event logic)
-        run: cargo test --workspace
+      - name: Unit tests (protocol, keys, switching, Mac logic, pairing, encryption)
+        run: cargo test --workspace --exclude kv-bridge
       - name: Type-check and lint the Windows and macOS code
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --exclude kv-bridge -- -D warnings
         env:
           RUSTFLAGS: --cfg kvm_check
 
-  windows:
-    name: Windows app (kvm-win.exe)
+  app-windows:
+    name: KV Bridge app (Windows installer)
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        working-directory: app
+        run: npx --yes @tauri-apps/cli@2 build --bundles nsis
+      - name: Collect installer
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/bundle/nsis/*-setup.exe dist/KV-Bridge-Setup.exe
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kv-bridge-windows
+          path: dist/KV-Bridge-Setup.exe
+
+  app-macos:
+    name: KV Bridge app (macOS dmg)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build (Apple Silicon + Intel)
+        working-directory: app
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
+      - name: Sign
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          APP="$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app)"
+          if [ -n "$MAC_CERT_P12" ]; then
+            # The same self-signed certificate every build, so macOS keeps the
+            # Accessibility permission across updates.
+            echo "$MAC_CERT_P12" | base64 --decode > cert.p12
+            security create-keychain -p ci build.keychain
+            security list-keychains -d user -s build.keychain login.keychain
+            security unlock-keychain -p ci build.keychain
+            security import cert.p12 -k build.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci build.keychain
+            security find-certificate -c "KV Bridge Self-Signed" -p build.keychain > cert.pem
+            sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain cert.pem || true
+            codesign --force --deep --sign "KV Bridge Self-Signed" --keychain build.keychain "$APP"
+            rm -f cert.p12
+          else
+            echo "::warning::MAC_CERT_P12 secret not set; using an ad-hoc signature (Accessibility permission must be re-granted after each update)"
+            codesign --force --deep --sign - "$APP"
+          fi
+          codesign --verify --deep --strict "$APP"
+          codesign -d -r- "$APP"
+      - name: Make dmg
+        run: |
+          APP="$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app)"
+          lipo -info "$APP/Contents/MacOS/kv-bridge"
+          mkdir -p dmg dist
+          cp -R "$APP" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "KV Bridge" -srcfolder dmg -ov -format UDZO dist/KV-Bridge.dmg
+          hdiutil verify dist/KV-Bridge.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kv-bridge-macos
+          path: dist/KV-Bridge.dmg
+
+  # The command-line tools from before the app (kept for testing).
+  cli-windows:
+    name: Command-line kvm-win.exe
     needs: test
     runs-on: windows-latest
     steps:
@@ -34,8 +104,8 @@ jobs:
           name: kvm-win-windows
           path: target/release/kvm-win.exe
 
-  macos:
-    name: macOS app (kvm-mac, Apple Silicon + Intel)
+  cli-macos:
+    name: Command-line kvm-mac
     needs: test
     runs-on: macos-latest
     steps:
@@ -43,9 +113,9 @@ jobs:
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: cargo build --release -p kvm-mac --target aarch64-apple-darwin
       - run: cargo build --release -p kvm-mac --target x86_64-apple-darwin
-      - name: Package universal binary + launcher
+      - name: Package
         run: |
-          mkdir -p dist/kvm-mac
+          mkdir -p dist/kvm-mac dist/dmg
           lipo -create \
             target/aarch64-apple-darwin/release/kvm-mac \
             target/x86_64-apple-darwin/release/kvm-mac \
@@ -53,22 +123,17 @@ jobs:
           codesign --force --sign - dist/kvm-mac/kvm-mac
           cp "mac-client/start.command" "dist/kvm-mac/Start kvm-mac.command"
           chmod +x dist/kvm-mac/kvm-mac "dist/kvm-mac/Start kvm-mac.command"
-          lipo -info dist/kvm-mac/kvm-mac
-          # Disk image: a "kvm-mac" folder to drag out, plus instructions.
-          mkdir -p dist/dmg
           cp -R dist/kvm-mac dist/dmg/
           cp mac-client/dmg-readme.txt "dist/dmg/READ ME FIRST.txt"
           hdiutil create -volname "kvm-mac" -srcfolder dist/dmg -ov -format UDZO dist/kvm-mac.dmg
-          hdiutil verify dist/kvm-mac.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: kvm-mac-macos
           path: dist/kvm-mac.dmg
 
   release:
-    # Publish both apps as a direct download (no GitHub login, no nested zips).
     name: Publish "latest" release
-    needs: [windows, macos]
+    needs: [app-windows, app-macos, cli-windows, cli-macos]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -85,6 +150,7 @@ jobs:
         run: |
           ls -la out
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest out/kvm-win.exe out/kvm-mac.dmg \
+          gh release create latest \
+            out/KV-Bridge-Setup.exe out/KV-Bridge.dmg out/kvm-win.exe out/kvm-mac.dmg \
             --target "$GITHUB_SHA" --prerelease --title "Latest build" \
-            --notes "Built from ${GITHUB_SHA::7}. Mac: download kvm-mac.dmg. Windows: download kvm-win.exe."
+            --notes "Built from ${GITHUB_SHA::7}. Install KV-Bridge-Setup.exe on Windows and KV-Bridge.dmg on the Mac. (kvm-win.exe / kvm-mac.dmg are the older command-line tools.)"

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KV Bridge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="" class="logo">
+    <div>
+      <h1>KV Bridge</h1>
+      <p class="sub" id="whoami">…</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card status" id="status-card">
+      <div class="dot" id="dot"></div>
+      <div>
+        <div class="big" id="summary">正在启动…</div>
+        <div class="msg" id="message"></div>
+      </div>
+    </section>
+
+    <section class="card warn hidden" id="ax-card">
+      <h2>需要「辅助功能」权限</h2>
+      <p>KV Bridge 需要这个权限才能在 Mac 上打字和移动鼠标。打开系统设置，在列表里找到 <b>KV Bridge</b> 并打开开关。</p>
+      <button id="ax-open">打开系统设置</button>
+    </section>
+
+    <!-- Mac: pairing code -->
+    <section class="card hidden" id="mac-pair">
+      <h2>配对</h2>
+      <div id="mac-pair-idle">
+        <p>第一次使用时，在这里生成配对码，然后在 Windows 的 KV Bridge 里输入。</p>
+        <button id="mac-pair-start">配对新电脑</button>
+      </div>
+      <div id="mac-pair-active" class="hidden">
+        <p>在 Windows 的 KV Bridge 里选择这台 Mac，输入：</p>
+        <div class="code" id="mac-code">------</div>
+        <p class="hint"><span id="mac-code-left"></span> 后失效 · <a href="#" id="mac-pair-cancel">取消</a></p>
+      </div>
+    </section>
+
+    <!-- Windows: find and pair -->
+    <section class="card hidden" id="win-pair">
+      <h2>附近的 Mac</h2>
+      <div id="found-list" class="list"></div>
+      <p class="hint" id="found-empty">正在同一个 Wi-Fi 里寻找打开了 KV Bridge 的 Mac…</p>
+      <details>
+        <summary>找不到？用 IP 地址配对</summary>
+        <div class="row">
+          <input id="manual-ip" placeholder="Mac 的 IP，例如 192.168.1.20">
+          <button id="manual-pair">配对</button>
+        </div>
+      </details>
+      <div id="pair-dialog" class="pair-dialog hidden">
+        <p>在 <b id="pair-target-name"></b> 上点「配对新电脑」，然后输入显示的 6 位数字：</p>
+        <div class="row">
+          <input id="pair-code" inputmode="numeric" maxlength="7" placeholder="123456" autocomplete="off">
+          <button id="pair-go">配对</button>
+          <button class="secondary" id="pair-cancel">取消</button>
+        </div>
+        <p class="error" id="pair-error"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>已配对的电脑</h2>
+      <div id="peer-list" class="list"></div>
+      <p class="hint" id="peer-empty">还没有配对。</p>
+    </section>
+
+    <section class="card" id="settings">
+      <h2>设置</h2>
+      <label class="field">这台电脑的名字
+        <input id="device-name">
+      </label>
+
+      <div class="win-only hidden">
+        <label class="field">切换控制的按键
+          <select id="toggle-button">
+            <option value="forward">Lift 的「前进」侧键</option>
+            <option value="back">Lift 的「后退」侧键</option>
+            <option value="none">不用鼠标按键</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="hotkey"> 也可以用 Ctrl+Alt+M 切换</label>
+        <label class="check"><input type="checkbox" id="sound"> 切换时发出提示音</label>
+      </div>
+
+      <div class="mac-only hidden">
+        <label class="check"><input type="checkbox" id="shortcuts"> 使用 Windows 快捷键习惯（Ctrl+C 复制、Alt+Tab 切换应用、终端里 Ctrl+C 中断…）</label>
+        <label class="field">Windows 键盘布局
+          <select id="layout">
+            <option value="auto">自动识别（推荐）</option>
+            <option value="uk">英式 (UK)</option>
+            <option value="us">美式 (US)</option>
+            <option value="off">不转换（按键位置发送）</option>
+          </select>
+        </label>
+        <label class="field">滚动速度 <span id="scroll-val"></span>
+          <input type="range" id="scroll" min="10" max="120" step="5">
+        </label>
+        <label class="check"><input type="checkbox" id="invert"> 反转滚动方向</label>
+        <label class="check"><input type="checkbox" id="jis"> Windows 用的是日文键盘（英数 / 半角全角键）</label>
+      </div>
+
+      <label class="check"><input type="checkbox" id="autostart"> 开机时自动启动</label>
+      <p class="saved hint" id="saved"></p>
+    </section>
+
+    <footer class="hint" id="footer"></footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

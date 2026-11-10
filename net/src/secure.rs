@@ -63,15 +63,23 @@ pub struct Sender {
 impl Sender {
     /// Send messages, batched into as few encrypted frames as possible.
     pub fn send(&mut self, msgs: &[Msg]) -> io::Result<()> {
-        let mut plain = Vec::with_capacity(64);
-        for m in msgs {
-            m.encode(&mut plain);
-        }
+        // Split only between messages, so each frame decodes on its own.
+        const LIMIT: usize = MAX - TAG - 16;
         let mut wire = Vec::new();
-        for chunk in plain.chunks(MAX - TAG - 16) {
-            let n = lock(&self.state).write_message(chunk, &mut self.buf).map_err(err)?;
-            wire.extend_from_slice(&(n as u16).to_be_bytes());
-            wire.extend_from_slice(&self.buf[..n]);
+        let mut plain = Vec::with_capacity(64);
+        let mut one = Vec::with_capacity(8);
+        let mut it = msgs.iter().peekable();
+        while let Some(m) = it.next() {
+            one.clear();
+            m.encode(&mut one);
+            plain.extend_from_slice(&one);
+            let next_len = it.peek().map(|_| 8).unwrap_or(0);
+            if it.peek().is_none() || plain.len() + next_len > LIMIT {
+                let n = lock(&self.state).write_message(&plain, &mut self.buf).map_err(err)?;
+                wire.extend_from_slice(&(n as u16).to_be_bytes());
+                wire.extend_from_slice(&self.buf[..n]);
+                plain.clear();
+            }
         }
         use std::io::Write;
         self.stream.write_all(&wire)

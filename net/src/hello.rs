@@ -1,7 +1,8 @@
 //! The first frame of every connection (plaintext), and the server's reply.
 //!
 //! Client -> server: `KVB2` + kind + id + name   (kind: 'P' pair, 'C' connect)
-//! Server -> client: 1 = go ahead, or 0 + a reason (UTF-8) and the connection closes.
+//! Server -> client: 1 + its id + name = go ahead, or 0 + a reason (UTF-8) and the
+//! connection closes.
 
 use crate::frame::{read_frame, write_frame};
 use std::io::{self, Read, Write};
@@ -63,9 +64,12 @@ impl Hello {
     }
 }
 
-/// Server: accept the hello.
-pub fn accept<W: Write>(w: &mut W) -> io::Result<()> {
-    write_frame(w, &[1])
+/// Server: accept the hello, saying who we are.
+pub fn accept<W: Write>(w: &mut W, my_id: &str, my_name: &str) -> io::Result<()> {
+    let mut b = vec![1u8];
+    put_str(&mut b, my_id);
+    put_str(&mut b, my_name);
+    write_frame(w, &b)
 }
 
 /// Server: refuse with a reason the client can show.
@@ -75,11 +79,16 @@ pub fn refuse<W: Write>(w: &mut W, reason: &str) -> io::Result<()> {
     write_frame(w, &b)
 }
 
-/// Client: wait for the server's answer. Err(reason) if refused.
-pub fn read_answer<R: Read>(r: &mut R) -> io::Result<Result<(), String>> {
+/// Client: wait for the server's answer: Ok((id, name)) or Err(reason) if refused.
+pub fn read_answer<R: Read>(r: &mut R) -> io::Result<Result<(String, String), String>> {
     let f = read_frame(r)?;
     match f.first() {
-        Some(1) => Ok(Ok(())),
+        Some(1) => {
+            let mut pos = 1;
+            let id = get_str(&f, &mut pos)?;
+            let name = get_str(&f, &mut pos)?;
+            Ok(Ok((id, name)))
+        }
         Some(0) => Ok(Err(String::from_utf8_lossy(&f[1..]).into_owned())),
         _ => Err(bad()),
     }
@@ -99,6 +108,9 @@ mod tests {
             h.write_to(&mut buf).unwrap();
             assert_eq!(Hello::read_from(&mut io::Cursor::new(buf)).unwrap(), h);
         }
+        let mut buf = Vec::new();
+        accept(&mut buf, "mac1", "Mac").unwrap();
+        assert_eq!(read_answer(&mut io::Cursor::new(buf)).unwrap(), Ok(("mac1".into(), "Mac".into())));
         let mut buf = Vec::new();
         refuse(&mut buf, "not pairing").unwrap();
         assert_eq!(read_answer(&mut io::Cursor::new(buf)).unwrap(), Err("not pairing".into()));

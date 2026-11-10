@@ -1,0 +1,28 @@
+[package]
+name = "kv-bridge"
+description = "KV Bridge: use one computer's keyboard and mouse on another"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "kv-bridge"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+kvm-core = { path = "../../core" }
+kvm-net = { path = "../../net" }
+
+[target.'cfg(windows)'.dependencies]
+kvm-win = { path = "../../win-server" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+kvm-mac = { path = "../../mac-client" }

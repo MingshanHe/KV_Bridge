@@ -3,7 +3,7 @@
 
 use crate::Options;
 use kvm_core::protocol::Msg;
-use kvm_core::router::{Config, Notice};
+use kvm_core::router::{Config, Hotkey, Notice};
 use kvm_win::capture::{self, button_name, local_ip, Event};
 use kvm_win::ffi::{wide, SetConsoleTitleW};
 use std::io::Write;
@@ -26,7 +26,10 @@ pub fn run(opts: Options) {
         }
     };
     capture::set_logging(opts.log_keys);
-    let Some(cap) = capture::start(Config { toggle_button: opts.toggle_button, hotkey: opts.hotkey }) else {
+    let Some(cap) = capture::start(Config {
+        toggle_button: opts.toggle_button,
+        hotkey: opts.hotkey.then_some(Hotkey::DEFAULT),
+    }) else {
         eprintln!("error: capture already running");
         std::process::exit(1);
     };
@@ -148,6 +151,7 @@ fn ui_thread(rx: Receiver<Event>, quiet: bool) {
     for ev in rx {
         match ev {
             Event::Log(s) => println!("{s}"),
+            Event::Recorded { .. } => {}
             Event::Notice(n) => {
                 match n {
                     Notice::EnteredRemote => {

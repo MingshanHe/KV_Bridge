@@ -4,7 +4,7 @@
 //! Kept free of any Windows API so it can be unit-tested anywhere.
 
 use crate::keymap::hid;
-use crate::protocol::{button, Msg};
+use crate::protocol::{button, mods, Msg};
 use std::collections::HashSet;
 
 /// Minimum time between two toggles, so one press can never switch twice.
@@ -49,18 +49,31 @@ pub struct Decision {
     pub notice: Option<Notice>,
 }
 
+/// A key combination on the Windows keyboard: modifier bits ([`crate::protocol::mods`])
+/// plus one non-modifier key (HID usage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hotkey {
+    pub mods: u8,
+    pub key: u16,
+}
+
+impl Hotkey {
+    /// Ctrl+Alt+M, the default keyboard switch.
+    pub const DEFAULT: Hotkey = Hotkey { mods: mods::CTRL | mods::ALT, key: hid::M };
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Wire button number that toggles control (button::BACK / button::FORWARD),
     /// or None to disable the mouse-button toggle.
     pub toggle_button: Option<u8>,
-    /// Ctrl+Alt+M toggles control as a keyboard fallback.
-    pub hotkey: bool,
+    /// Keyboard combination that toggles control, or None.
+    pub hotkey: Option<Hotkey>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { toggle_button: Some(button::FORWARD), hotkey: true }
+        Config { toggle_button: Some(button::FORWARD), hotkey: Some(Hotkey::DEFAULT) }
     }
 }
 
@@ -75,6 +88,8 @@ pub struct Router {
     /// reach GetAsyncKeyState.
     ctrl_down: HashSet<u16>,
     alt_down: HashSet<u16>,
+    shift_down: HashSet<u16>,
+    win_down: HashSet<u16>,
     /// Key-up of the hotkey's letter, swallowed whichever mode we're in by then.
     swallow_key_up: Option<u32>,
     swallow_button_up: Option<u8>,
@@ -91,6 +106,8 @@ impl Router {
             windows_down: HashSet::new(),
             ctrl_down: HashSet::new(),
             alt_down: HashSet::new(),
+            shift_down: HashSet::new(),
+            win_down: HashSet::new(),
             swallow_key_up: None,
             swallow_button_up: None,
             last_toggle_ms: None,
@@ -101,6 +118,30 @@ impl Router {
     /// Change the switching settings while running.
     pub fn set_config(&mut self, cfg: Config) {
         self.cfg = cfg;
+    }
+
+    /// Modifier keys physically held now ([`mods`] bits).
+    pub fn held_mods(&self) -> u8 {
+        let mut m = 0;
+        if !self.ctrl_down.is_empty() {
+            m |= mods::CTRL;
+        }
+        if !self.shift_down.is_empty() {
+            m |= mods::SHIFT;
+        }
+        if !self.alt_down.is_empty() {
+            m |= mods::ALT;
+        }
+        if !self.win_down.is_empty() {
+            m |= mods::WIN;
+        }
+        m
+    }
+
+    /// Swallow the next release of this key (used when a press was consumed elsewhere,
+    /// e.g. while recording a shortcut).
+    pub fn swallow_release(&mut self, id: u32) {
+        self.swallow_key_up = Some(id);
     }
 
     pub fn mode(&self) -> Mode {
@@ -179,12 +220,21 @@ impl Router {
     }
 
     fn on_key(&mut self, id: u32, hid: Option<u16>, down: bool, now_ms: u64) -> Decision {
-        // Track physical Ctrl/Alt in both modes.
+        // Track physical modifiers in both modes.
         if let Some(h) = hid {
-            if hid::is_ctrl(h) {
-                if down { self.ctrl_down.insert(h); } else { self.ctrl_down.remove(&h); }
-            } else if hid::is_alt(h) {
-                if down { self.alt_down.insert(h); } else { self.alt_down.remove(&h); }
+            let set = match h {
+                hid::LEFT_CTRL | hid::RIGHT_CTRL => Some(&mut self.ctrl_down),
+                hid::LEFT_ALT | hid::RIGHT_ALT => Some(&mut self.alt_down),
+                hid::LEFT_SHIFT | hid::RIGHT_SHIFT => Some(&mut self.shift_down),
+                hid::LEFT_GUI | hid::RIGHT_GUI => Some(&mut self.win_down),
+                _ => None,
+            };
+            if let Some(set) = set {
+                if down {
+                    set.insert(h);
+                } else {
+                    set.remove(&h);
+                }
             }
         }
 
@@ -194,13 +244,9 @@ impl Router {
             return Decision { block: true, ..Default::default() };
         }
 
-        // Ctrl+Alt+M.
-        if down
-            && self.cfg.hotkey
-            && hid == Some(hid::M)
-            && !self.ctrl_down.is_empty()
-            && !self.alt_down.is_empty()
-        {
+        // The switch hotkey: exactly its modifiers plus its key.
+        let held = self.held_mods();
+        if down && self.cfg.hotkey.is_some_and(|hk| hid == Some(hk.key) && held == hk.mods) {
             self.swallow_key_up = Some(id);
             return self.toggle(now_ms);
         }
@@ -379,6 +425,34 @@ mod tests {
         assert_eq!(d.send, vec![Msg::Leave]);
         assert_eq!(r.mode(), Mode::Local);
         assert!(r.handle(key(VK_M, hid::M, false), 530).block);
+    }
+
+    #[test]
+    fn custom_hotkey_and_exact_modifiers() {
+        const VK_WIN: u32 = 0x5B;
+        const VK_SPACE: u32 = 0x20;
+        let mut r = Router::new(Config {
+            toggle_button: None,
+            hotkey: Some(Hotkey { mods: mods::WIN | mods::SHIFT, key: 0x2C }), // Win+Shift+Space
+        });
+        r.set_connected(true);
+        assert!(!r.handle(key(VK_WIN, hid::LEFT_GUI, true), 0).block);
+        // Win+Space alone (no Shift) is not the hotkey.
+        let d = r.handle(key(VK_SPACE, 0x2C, true), 10);
+        assert!(!d.block);
+        r.handle(key(VK_SPACE, 0x2C, false), 20);
+        r.handle(key(0xA0, hid::LEFT_SHIFT, true), 30);
+        let d = r.handle(key(VK_SPACE, 0x2C, true), 40);
+        assert_eq!(d.send, vec![Msg::Enter]);
+        assert!(r.handle(key(VK_SPACE, 0x2C, false), 50).block);
+        // A single key with no modifiers works too (e.g. Scroll Lock).
+        let mut r = Router::new(Config { toggle_button: None, hotkey: Some(Hotkey { mods: 0, key: 0x47 }) });
+        r.set_connected(true);
+        assert_eq!(r.handle(key(0x91, 0x47, true), 0).send, vec![Msg::Enter]);
+        // With Ctrl held it doesn't match.
+        r.handle(key(0x91, 0x47, false), 10);
+        r.handle(key(VK_CTRL, hid::LEFT_CTRL, true), 300);
+        assert!(r.handle(key(0x91, 0x47, true), 400).send.iter().all(|m| *m != Msg::Leave));
     }
 
     #[test]

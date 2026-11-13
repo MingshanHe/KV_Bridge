@@ -27,20 +27,50 @@ pub struct Peer {
     pub last_addr: Option<String>,
 }
 
+/// A key combination on the Windows keyboard.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Combo {
+    /// Modifier bits: 1 Ctrl, 2 Shift, 4 Alt, 8 Win.
+    pub mods: u8,
+    /// HID usage of the key.
+    pub key: u16,
+}
+
+/// A custom shortcut: pressing `from` on Windows does something on the Mac.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleCfg {
+    pub from: Combo,
+    /// "keys" (press `to_mods` + `to_key` on the Mac) or "input" (switch input source).
+    pub action: String,
+    /// Mac modifier bits: 1 Ctrl, 2 Shift, 4 Option, 8 Cmd.
+    #[serde(default)]
+    pub to_mods: u8,
+    #[serde(default)]
+    pub to_key: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WinCfg {
     /// "forward", "back" or "none".
     pub toggle_button: String,
-    /// Ctrl+Alt+M also switches.
-    pub hotkey: bool,
+    /// Keyboard shortcut that switches control (None = mouse button only).
+    pub switch_hotkey: Option<Combo>,
     /// Beep when switching.
     pub sound: bool,
+    /// Custom shortcuts, applied on the Mac.
+    pub rules: Vec<RuleCfg>,
 }
 
 impl Default for WinCfg {
     fn default() -> Self {
-        WinCfg { toggle_button: "forward".into(), hotkey: true, sound: true }
+        let d = kvm_core::router::Hotkey::DEFAULT;
+        WinCfg {
+            toggle_button: "forward".into(),
+            switch_hotkey: Some(Combo { mods: d.mods, key: d.key }),
+            sound: true,
+            rules: Vec::new(),
+        }
     }
 }
 
@@ -79,8 +109,11 @@ impl WinCfg {
             "none" => None,
             _ => Some(button::FORWARD),
         };
+        let mut hotkey = self.switch_hotkey.map(|c| kvm_core::router::Hotkey { mods: c.mods, key: c.key });
         // Never leave the user without a way to switch back.
-        let hotkey = self.hotkey || toggle_button.is_none();
+        if toggle_button.is_none() && hotkey.is_none() {
+            hotkey = Some(kvm_core::router::Hotkey::DEFAULT);
+        }
         kvm_core::router::Config { toggle_button, hotkey }
     }
 }

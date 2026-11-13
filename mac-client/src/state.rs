@@ -21,7 +21,7 @@
 
 use kvm_core::keymap::{self, hid, mac};
 use kvm_core::layout::WinLayout;
-use kvm_core::protocol::{button, Msg, WHEEL_DELTA};
+use kvm_core::protocol::{action, button, macmods, mods, Msg, WHEEL_DELTA};
 
 /// CGEventFlags masks.
 pub mod flag {
@@ -159,6 +159,8 @@ pub enum Out {
     Scroll { dy: i32, dx: i32 },
     /// Type this character directly (used when no Mac key produces it).
     Text(char),
+    /// Switch to the other input source (custom shortcut action).
+    SwitchInput,
 }
 
 /// Kind of physical (Windows-keyboard) modifier.
@@ -276,6 +278,18 @@ pub struct Injector {
     scroll_rem: (f64, f64),
     /// Layout of the Windows keyboard, from settings or reported by kvm-win.
     win_layout: Option<WinLayout>,
+    /// Custom shortcuts sent by Windows.
+    rules: Vec<Rule>,
+}
+
+/// A custom shortcut: Windows `from_mods`+`from_key` does `action` on the Mac.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rule {
+    pub from_mods: u8,
+    pub from_key: u16,
+    pub action: u8,
+    pub to_mods: u8,
+    pub to_key: u16,
 }
 
 impl Injector {
@@ -292,6 +306,7 @@ impl Injector {
             bounds: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             last_click: None,
             scroll_rem: (0.0, 0.0),
+            rules: Vec::new(),
             win_layout: match s.layout {
                 LayoutMode::Fixed(l) => Some(l),
                 _ => None,
@@ -342,6 +357,15 @@ impl Injector {
             Msg::Button { button: b, down } => self.button(b, down, now_ms),
             Msg::Scroll { dx, dy } => self.scroll(dx, dy),
             Msg::Leave => self.release_all(),
+            Msg::RulesClear => {
+                self.rules.clear();
+                Vec::new()
+            }
+            Msg::Rule { from_mods, from_key, action, to_mods, to_key } => {
+                self.rules.retain(|r| !(r.from_mods == from_mods && r.from_key == from_key));
+                self.rules.push(Rule { from_mods, from_key, action, to_mods, to_key });
+                Vec::new()
+            }
             Msg::Layout(hkl) => {
                 if self.s.layout == LayoutMode::Auto {
                     self.win_layout = WinLayout::from_hkl(hkl);
@@ -443,6 +467,17 @@ impl Injector {
             }
         }
 
+        // Custom shortcuts come before every built-in rule.
+        if down {
+            let held = self.phys_mods();
+            if let Some(r) = self.rules.iter().find(|r| r.from_key == h && r.from_mods == held).copied() {
+                if !self.tapped.contains(&h) {
+                    self.tapped.push(h);
+                }
+                return self.apply_rule(r);
+            }
+        }
+
         if self.s.jis {
             if h == hid::GRAVE {
                 // 半角/全角: one key toggles the Mac between Eisu and Kana.
@@ -514,6 +549,67 @@ impl Injector {
             }
         }
         out
+    }
+
+    /// Physical Windows modifiers held now, as [`mods`] bits.
+    fn phys_mods(&self) -> u8 {
+        self.phys.iter().fold(0, |m, p| {
+            m | match p.kind {
+                Phys::Ctrl => mods::CTRL,
+                Phys::Shift => mods::SHIFT,
+                Phys::Alt => mods::ALT,
+                Phys::Win => mods::WIN,
+            }
+        })
+    }
+
+    fn apply_rule(&mut self, r: Rule) -> Vec<Out> {
+        match r.action {
+            action::SWITCH_INPUT => vec![Out::SwitchInput],
+            action::KEYS => match keymap::hid_to_mac(r.to_key) {
+                Some(code) => self.chord(code, r.to_mods),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Press `code` with exactly the Mac modifiers in `want` ([`macmods`] bits), then
+    /// put back whatever modifiers were held before.
+    fn chord(&mut self, code: u16, want: u8) -> Vec<Out> {
+        let mut v = Vec::new();
+        let saved = std::mem::take(&mut self.sent_mods);
+        self.sent_mods = saved.clone();
+        for c in saved.iter().rev() {
+            self.sent_mods.retain(|s| s != c);
+            v.push(Out::Key { code: *c, down: false, flags: self.flags(), modifier: true, autorepeat: false });
+        }
+        let targets: Vec<u16> = [
+            (macmods::CTRL, mac::CONTROL),
+            (macmods::SHIFT, mac::SHIFT),
+            (macmods::OPTION, mac::OPTION),
+            (macmods::CMD, mac::COMMAND),
+        ]
+        .iter()
+        .filter(|(bit, _)| want & bit != 0)
+        .map(|&(_, c)| c)
+        .collect();
+        for &c in &targets {
+            self.sent_mods.push(c);
+            v.push(Out::Key { code: c, down: true, flags: self.flags(), modifier: true, autorepeat: false });
+        }
+        let flags = self.flags_for(code);
+        v.push(Out::Key { code, down: true, flags, modifier: false, autorepeat: false });
+        v.push(Out::Key { code, down: false, flags, modifier: false, autorepeat: false });
+        for &c in targets.iter().rev() {
+            self.sent_mods.retain(|&s| s != c);
+            v.push(Out::Key { code: c, down: false, flags: self.flags(), modifier: true, autorepeat: false });
+        }
+        for c in saved {
+            self.sent_mods.push(c);
+            v.push(Out::Key { code: c, down: true, flags: self.flags(), modifier: true, autorepeat: false });
+        }
+        v
     }
 
     /// Symbol keys when the layouts differ: find the character the Windows keyboard
@@ -832,6 +928,52 @@ mod tests {
         i.handle(Msg::Layout(0x0809_0809), 0, &mut JisMac);
         assert_eq!(i.win_layout(), Some(WinLayout::Uk));
         i
+    }
+
+    #[test]
+    fn custom_rule_win_space_switches_input() {
+        let mut i = inj();
+        let c = &mut NoCtx;
+        i.handle(Msg::Rule { from_mods: mods::WIN, from_key: 0x2C, action: action::SWITCH_INPUT, to_mods: 0, to_key: 0 }, 0, c);
+        press(&mut i, hid::LEFT_GUI, c); // Win -> Ctrl on the Mac
+        assert_eq!(press(&mut i, 0x2C, c), vec![Out::SwitchInput]);
+        assert!(release(&mut i, 0x2C, c).is_empty());
+        // Space without Win is still a space.
+        release(&mut i, hid::LEFT_GUI, c);
+        assert_eq!(keys(&press(&mut i, 0x2C, c)), vec![(0x31, true)]);
+    }
+
+    #[test]
+    fn custom_rule_sends_exact_mac_chord_and_restores_modifiers() {
+        let mut i = inj();
+        let c = &mut NoCtx;
+        // Alt+` -> Ctrl+Space on the Mac.
+        i.handle(
+            Msg::Rule { from_mods: mods::ALT, from_key: 0x35, action: action::KEYS, to_mods: macmods::CTRL, to_key: 0x2C },
+            0,
+            c,
+        );
+        assert_eq!(keys(&press(&mut i, hid::LEFT_ALT, c)), vec![(mac::OPTION, true)]);
+        let o = press(&mut i, 0x35, c);
+        assert_eq!(
+            keys(&o),
+            vec![
+                (mac::OPTION, false),
+                (mac::CONTROL, true),
+                (0x31, true),
+                (0x31, false),
+                (mac::CONTROL, false),
+                (mac::OPTION, true),
+            ]
+        );
+        let (_, _, f) = key_out(&o[2]);
+        assert!(f & flag::CONTROL != 0 && f & flag::ALTERNATE == 0);
+        assert!(release(&mut i, 0x35, c).is_empty());
+        assert_eq!(keys(&release(&mut i, hid::LEFT_ALT, c)), vec![(mac::OPTION, false)]);
+        // Clearing removes it.
+        i.handle(Msg::RulesClear, 0, c);
+        press(&mut i, hid::LEFT_ALT, c);
+        assert_eq!(keys(&press(&mut i, 0x35, c)), vec![(0x32, true)]);
     }
 
     #[test]

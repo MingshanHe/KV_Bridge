@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every build gets its own version, so the app's updater can tell it's newer.
+  APP_VERSION: 0.4.${{ github.run_number }}
 
 jobs:
   test:
@@ -30,7 +32,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: Build
         working-directory: app
-        run: npx --yes @tauri-apps/cli@2 build --bundles nsis
+        shell: bash
+        run: npx --yes @tauri-apps/cli@2 build --bundles nsis --config "{\"version\":\"$APP_VERSION\"}"
       - name: Collect installer
         shell: bash
         run: |
@@ -51,7 +54,7 @@ jobs:
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build (Apple Silicon + Intel)
         working-directory: app
-        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app --config "{\"version\":\"$APP_VERSION\"}"
       - name: Sign
         env:
           MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
@@ -143,6 +146,14 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: Write latest.json (version + checksums, read by the app's updater)
+        run: |
+          B="https://github.com/${{ github.repository }}/releases/download/latest"
+          W=$(sha256sum out/KV-Bridge-Setup.exe | cut -d' ' -f1)
+          M=$(sha256sum out/KV-Bridge.dmg | cut -d' ' -f1)
+          printf '{"version":"%s","windows":{"url":"%s/KV-Bridge-Setup.exe","sha256":"%s"},"macos":{"url":"%s/KV-Bridge.dmg","sha256":"%s"}}\n' \
+            "$APP_VERSION" "$B" "$W" "$B" "$M" > out/latest.json
+          cat out/latest.json
       - name: Replace the "latest" release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,6 +162,6 @@ jobs:
           ls -la out
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest \
-            out/KV-Bridge-Setup.exe out/KV-Bridge.dmg out/kvm-win.exe out/kvm-mac.dmg \
+            out/KV-Bridge-Setup.exe out/KV-Bridge.dmg out/latest.json out/kvm-win.exe out/kvm-mac.dmg \
             --target "$GITHUB_SHA" --prerelease --title "Latest build" \
-            --notes "Built from ${GITHUB_SHA::7}. Install KV-Bridge-Setup.exe on Windows and KV-Bridge.dmg on the Mac. (kvm-win.exe / kvm-mac.dmg are the older command-line tools.)"
+            --notes "Version $APP_VERSION, built from ${GITHUB_SHA::7}. Install KV-Bridge-Setup.exe on Windows and KV-Bridge.dmg on the Mac. (kvm-win.exe / kvm-mac.dmg are the older command-line tools.)"

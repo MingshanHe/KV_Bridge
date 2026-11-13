@@ -73,7 +73,7 @@ impl Sender {
             one.clear();
             m.encode(&mut one);
             plain.extend_from_slice(&one);
-            let next_len = it.peek().map(|_| 8).unwrap_or(0);
+            let next_len = it.peek().map(|_| 16).unwrap_or(0); // longest message is 8 bytes
             if it.peek().is_none() || plain.len() + next_len > LIMIT {
                 let n = lock(&self.state).write_message(&plain, &mut self.buf).map_err(err)?;
                 wire.extend_from_slice(&(n as u16).to_be_bytes());

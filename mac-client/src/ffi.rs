@@ -118,6 +118,9 @@ extern "C" {
     ) -> CFStringRef;
     pub fn CFStringGetLength(s: CFStringRef) -> isize;
     pub fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+    pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    pub fn CFArrayGetValueAtIndex(array: CFTypeRef, idx: isize) -> CFTypeRef;
+    pub fn CFStringGetCString(s: CFStringRef, buf: *mut std::ffi::c_char, size: isize, encoding: u32) -> u8;
     pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
     pub fn CFStringGetTypeID() -> usize;
     // Only their addresses are used.
@@ -145,6 +148,13 @@ pub const kUCKeyActionDown: u16 = 0;
 #[cfg_attr(target_os = "macos", link(name = "Carbon", kind = "framework"))]
 extern "C" {
     pub fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+    pub fn TISCopyCurrentKeyboardInputSource() -> CFTypeRef;
+    pub fn TISCreateInputSourceList(properties: CFDictionaryRef, include_all_installed: u8) -> CFTypeRef;
+    pub fn TISSelectInputSource(source: CFTypeRef) -> i32;
+    pub static kTISPropertyInputSourceID: CFStringRef;
+    pub static kTISPropertyInputSourceIsSelectCapable: CFStringRef;
+    pub static kTISPropertyInputSourceCategory: CFStringRef;
+    pub static kTISCategoryKeyboardInputSource: CFStringRef;
     pub fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef;
     pub fn TISGetInputSourceProperty(source: CFTypeRef, key: CFStringRef) -> *const c_void;
     pub static kTISPropertyUnicodeKeyLayoutData: CFStringRef;

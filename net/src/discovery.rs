@@ -1,4 +1,5 @@
-//! Finding the Mac on the local network with mDNS (Bonjour).
+//! Finding the other computer on the local network with mDNS (Bonjour). Both the
+//! Windows and the Mac app announce themselves, with their role in the TXT record.
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
@@ -8,11 +9,13 @@ use std::thread;
 
 pub const SERVICE: &str = "_kvbridge._tcp.local.";
 
-/// A Mac seen on the network.
+/// A computer seen on the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub id: String,
     pub name: String,
+    /// "windows" or "mac".
+    pub role: String,
     pub addrs: Vec<IpAddr>,
     pub port: u16,
 }
@@ -28,12 +31,13 @@ impl Drop for Advertiser {
     }
 }
 
-/// Announce this Mac (id, display name, port) on the LAN.
-pub fn advertise(id: &str, name: &str, port: u16) -> Result<Advertiser, String> {
+/// Announce this computer (id, display name, role, port) on the LAN.
+pub fn advertise(id: &str, name: &str, role: &str, port: u16) -> Result<Advertiser, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let mut props = HashMap::new();
     props.insert("id".to_string(), id.to_string());
     props.insert("name".to_string(), name.to_string());
+    props.insert("role".to_string(), role.to_string());
     let host = format!("kvb-{id}.local.");
     let info = ServiceInfo::new(SERVICE, &format!("kvb-{id}"), &host, "", port, props)
         .map_err(|e| e.to_string())?
@@ -53,7 +57,7 @@ impl Drop for Browser {
     }
 }
 
-/// Look for Macs. Each time one is (re)resolved it is sent on the channel.
+/// Look for KV Bridge computers. Each time one is (re)resolved it is sent on the channel.
 pub fn browse() -> Result<(Browser, Receiver<Found>), String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let events = daemon.browse(SERVICE).map_err(|e| e.to_string())?;
@@ -66,11 +70,13 @@ pub fn browse() -> Result<(Browser, Receiver<Found>), String> {
                     let Some(id) = info.get_property_val_str("id").map(str::to_string) else {
                         continue;
                     };
-                    let name = info.get_property_val_str("name").unwrap_or("Mac").to_string();
+                    let name = info.get_property_val_str("name").unwrap_or("Computer").to_string();
+                    // Versions before 0.4 only ran this on the Mac.
+                    let role = info.get_property_val_str("role").unwrap_or("mac").to_string();
                     let mut addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
                     // Prefer IPv4: simplest on home networks.
                     addrs.sort_by_key(|a| !a.is_ipv4());
-                    if tx.send(Found { id, name, addrs, port: info.get_port() }).is_err() {
+                    if tx.send(Found { id, name, role, addrs, port: info.get_port() }).is_err() {
                         break;
                     }
                 }

@@ -14,12 +14,38 @@
 //! | 0x20 | MouseMove  | dx (i16), dy (i16)           |
 //! | 0x21 | Button     | button (u8), down (u8)       |
 //! | 0x22 | Scroll     | dx (i16), dy (i16)           |
+//! | 0x05 | RulesClear | –                            |
+//! | 0x06 | Rule       | from mods u8, from key u16, action u8, to mods u8, to key u16 |
 //! | 0x30 | Heartbeat  | –                            |
 
 use std::io::{self, Read, Write};
 
 pub const MAGIC: [u8; 4] = *b"KVMB";
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
+
+/// Windows-keyboard modifier bits.
+pub mod mods {
+    pub const CTRL: u8 = 1;
+    pub const SHIFT: u8 = 2;
+    pub const ALT: u8 = 4;
+    pub const WIN: u8 = 8;
+}
+
+/// Mac modifier bits (targets of custom rules).
+pub mod macmods {
+    pub const CTRL: u8 = 1;
+    pub const SHIFT: u8 = 2;
+    pub const OPTION: u8 = 4;
+    pub const CMD: u8 = 8;
+}
+
+/// What a custom rule does.
+pub mod action {
+    /// Press `to_mods` + `to_key` on the Mac.
+    pub const KEYS: u8 = 1;
+    /// Switch the Mac's input source (like Ctrl+Space).
+    pub const SWITCH_INPUT: u8 = 2;
+}
 
 /// Mouse buttons on the wire.
 pub mod button {
@@ -44,6 +70,10 @@ pub enum Msg {
     Leave,
     /// The Windows keyboard layout (HKL from GetKeyboardLayout), sent before Enter.
     Layout(u32),
+    /// Forget all custom shortcut rules (sent before the current list).
+    RulesClear,
+    /// A custom shortcut: Windows `from_mods`+`from_key` does `action` on the Mac.
+    Rule { from_mods: u8, from_key: u16, action: u8, to_mods: u8, to_key: u16 },
     KeyDown(u16),
     KeyUp(u16),
     MouseMove { dx: i16, dy: i16 },
@@ -71,6 +101,15 @@ impl Msg {
             Msg::Layout(hkl) => {
                 out.push(0x04);
                 out.extend_from_slice(&hkl.to_be_bytes());
+            }
+            Msg::RulesClear => out.push(0x05),
+            Msg::Rule { from_mods, from_key, action, to_mods, to_key } => {
+                out.push(0x06);
+                out.push(from_mods);
+                out.extend_from_slice(&from_key.to_be_bytes());
+                out.push(action);
+                out.push(to_mods);
+                out.extend_from_slice(&to_key.to_be_bytes());
             }
             Msg::KeyDown(hid) => {
                 out.push(0x10);
@@ -124,6 +163,14 @@ impl Msg {
                 r.read_exact(&mut b)?;
                 Msg::Layout(u32::from_be_bytes(b))
             }
+            0x05 => Msg::RulesClear,
+            0x06 => Msg::Rule {
+                from_mods: read_u8(r)?,
+                from_key: read_u16(r)?,
+                action: read_u8(r)?,
+                to_mods: read_u8(r)?,
+                to_key: read_u16(r)?,
+            },
             0x10 => Msg::KeyDown(read_u16(r)?),
             0x11 => Msg::KeyUp(read_u16(r)?),
             0x20 => Msg::MouseMove { dx: read_i16(r)?, dy: read_i16(r)? },
@@ -170,6 +217,9 @@ mod tests {
             Msg::Enter,
             Msg::Leave,
             Msg::Layout(0x0809_0809),
+            Msg::RulesClear,
+            Msg::Rule { from_mods: mods::WIN, from_key: 0x2C, action: action::SWITCH_INPUT, to_mods: 0, to_key: 0 },
+            Msg::Rule { from_mods: 3, from_key: 0x35, action: action::KEYS, to_mods: macmods::CMD, to_key: 0x2C },
             Msg::KeyDown(0x04),
             Msg::KeyUp(0xE3),
             Msg::MouseMove { dx: -300, dy: 17 },

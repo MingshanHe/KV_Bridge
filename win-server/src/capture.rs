@@ -17,12 +17,16 @@ static ROUTER: OnceLock<Mutex<Router>> = OnceLock::new();
 static NET_TX: OnceLock<Sender<Msg>> = OnceLock::new();
 static UI_TX: OnceLock<Sender<Event>> = OnceLock::new();
 static LOG_KEYS: AtomicBool = AtomicBool::new(false);
+static RECORDING: AtomicBool = AtomicBool::new(false);
 
 /// What capture reports to the app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Notice(Notice),
     Log(String),
+    /// A key combination recorded after [`start_recording`]: modifier bits
+    /// (`protocol::mods`) and the key's HID usage.
+    Recorded { mods: u8, key: u16 },
 }
 
 /// Channels from a running capture.
@@ -92,6 +96,16 @@ pub fn start(cfg: Config) -> Option<Capture> {
 /// Change the toggle button / hotkey while running.
 pub fn set_config(cfg: Config) {
     router().set_config(cfg);
+}
+
+/// Capture the next key combination instead of passing it on (for choosing a
+/// shortcut). The result arrives as [`Event::Recorded`].
+pub fn start_recording() {
+    RECORDING.store(true, Ordering::SeqCst);
+}
+
+pub fn cancel_recording() {
+    RECORDING.store(false, Ordering::SeqCst);
 }
 
 /// Log every key and button event (for testing).
@@ -271,6 +285,22 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     hid.map(|h| format!("HID 0x{h:02x}")).unwrap_or_else(|| "unmapped".into()),
                     if kb.flags & LLKHF_INJECTED != 0 { " (injected)" } else { "" },
                 ));
+            }
+            // Recording a shortcut: the first non-modifier key press, with whatever
+            // modifiers are held, is captured and kept from Windows.
+            if down && RECORDING.load(Ordering::SeqCst) {
+                if let Some(h) = hid.filter(|&h| !(0xE0..=0xE7).contains(&h)) {
+                    RECORDING.store(false, Ordering::SeqCst);
+                    let mods = {
+                        let mut r = router();
+                        r.swallow_release(id);
+                        r.held_mods()
+                    };
+                    if let Some(tx) = UI_TX.get() {
+                        let _ = tx.send(Event::Recorded { mods, key: h });
+                    }
+                    return 1;
+                }
             }
             if route(Input::Key { id, hid, down }) {
                 return 1;

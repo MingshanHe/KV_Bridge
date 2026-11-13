@@ -40,6 +40,8 @@ impl From<io::Error> for PairError {
     }
 }
 
+// SPAKE2 roles: A = the side that typed the code and connected, B = the side that
+// showed the code. (Labels kept from v0.3 so earlier pairings stay valid.)
 const ID_A: &[u8] = b"kvbridge-pair-windows";
 const ID_B: &[u8] = b"kvbridge-pair-mac";
 
@@ -89,24 +91,24 @@ fn exchange<S: Read + Write>(
     Ok(Paired { psk: derive_psk(&key, client_id, server_id) })
 }
 
-/// Windows side: after sending `Hello::Pair` and being accepted.
+/// The side that typed the code: after sending `Hello::Pair` and being accepted.
 pub fn as_client<S: Read + Write>(
     s: &mut S,
     code: &str,
     my_id: &str,
-    mac_id: &str,
+    peer_id: &str,
 ) -> Result<Paired, PairError> {
-    exchange(s, true, code, my_id, mac_id)
+    exchange(s, true, code, my_id, peer_id)
 }
 
-/// Mac side: after accepting a `Hello::Pair` from `windows_id`.
+/// The side that showed the code: after accepting a `Hello::Pair` from `peer_id`.
 pub fn as_server<S: Read + Write>(
     s: &mut S,
     code: &str,
     my_id: &str,
-    windows_id: &str,
+    peer_id: &str,
 ) -> Result<Paired, PairError> {
-    exchange(s, false, code, windows_id, my_id)
+    exchange(s, false, code, peer_id, my_id)
 }
 
 #[cfg(test)]

@@ -5,10 +5,12 @@
 
 mod commands;
 mod config;
+mod link;
 #[cfg(target_os = "macos")]
 mod mac_side;
 mod shared;
 mod tray;
+mod updater;
 #[cfg(windows)]
 mod win_side;
 
@@ -41,6 +43,21 @@ fn main() {
             }
             #[cfg(windows)]
             win_side::start(app.handle().clone(), sh.clone());
+            link::start(app.handle().clone(), sh.clone());
+
+            // Look for updates shortly after start, then every 6 hours.
+            {
+                let (app, sh) = (app.handle().clone(), sh.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    loop {
+                        if let Ok(Some(l)) = updater::check(&commands::version(&app)) {
+                            sh.live().update_available = Some(l.version);
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                    }
+                });
+            }
 
             tray::refresh(app.handle(), &sh);
             if !std::env::args().any(|a| a == "--autostart") {
@@ -64,6 +81,11 @@ fn main() {
             commands::pair_with,
             commands::forget_peer,
             commands::open_accessibility,
+            commands::start_recording,
+            commands::cancel_recording,
+            commands::take_recorded,
+            commands::check_update,
+            commands::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running KV Bridge");

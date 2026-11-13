@@ -5,5 +5,12 @@
   <!-- Menu-bar app: no Dock icon. -->
   <key>LSUIElement</key>
   <true/>
+  <!-- Needed on macOS 15+ to find and talk to the Windows PC on the local network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>KV Bridge 需要访问本地网络，才能找到并连接同一网络里的 Windows 电脑。</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_kvbridge._tcp</string>
+  </array>
 </dict>
 </plist>

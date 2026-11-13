@@ -21,6 +21,8 @@ pub struct Shared {
 pub struct Live {
     /// Name of the computer we're connected to.
     pub connected: Option<String>,
+    /// Its id.
+    pub connected_id: Option<String>,
     /// Windows: the Mac has control. Mac: Windows is controlling this Mac.
     pub controlling: bool,
     /// Last thing worth telling the user.
@@ -31,7 +33,14 @@ pub struct Live {
     pub pairing: Option<(String, Instant)>,
     /// Mac: the current session's connection, so a newer one can replace it.
     pub session: Option<(u64, TcpStream)>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Windows: a key combination just recorded for a shortcut setting.
+    pub recorded: Option<(u8, u16)>,
+    /// The listening port couldn't be opened.
+    pub listen_error: Option<String>,
+    /// A newer version found by the update check.
+    pub update_available: Option<String>,
+    /// Progress or problem while updating.
+    pub update_status: String,
     pub session_counter: u64,
 }
 

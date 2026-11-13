@@ -143,6 +143,75 @@ pub fn on_main<R, F: FnOnce() -> R>(f: F) -> R {
     }
 }
 
+fn cf_to_string(s: CFStringRef) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    let mut buf = [0 as std::ffi::c_char; 512];
+    let ok = unsafe { CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as isize, kCFStringEncodingUTF8) };
+    if ok == 0 {
+        return None;
+    }
+    let c = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(c.to_string_lossy().into_owned())
+}
+
+fn source_id(src: CFTypeRef) -> Option<String> {
+    if src.is_null() {
+        return None;
+    }
+    cf_to_string(unsafe { TISGetInputSourceProperty(src, kTISPropertyInputSourceID) })
+}
+
+/// The input source we switched away from last time, to switch back to it.
+static PREVIOUS_INPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Switch between the two most recently used input sources (like macOS's own
+/// Ctrl+Space), or to the next one the first time. Main thread only.
+pub fn switch_input_source() {
+    unsafe {
+        let keys = [kTISPropertyInputSourceIsSelectCapable, kTISPropertyInputSourceCategory];
+        let values = [kCFBooleanTrue, kTISCategoryKeyboardInputSource];
+        let props = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            2,
+            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const _,
+            &kCFTypeDictionaryValueCallBacks as *const u8 as *const _,
+        );
+        let list = TISCreateInputSourceList(props, 0);
+        if !props.is_null() {
+            CFRelease(props);
+        }
+        if list.is_null() {
+            return;
+        }
+        let n = CFArrayGetCount(list);
+        let ids: Vec<Option<String>> = (0..n).map(|i| source_id(CFArrayGetValueAtIndex(list, i))).collect();
+        let cur = TISCopyCurrentKeyboardInputSource();
+        let cur_id = source_id(cur);
+        if !cur.is_null() {
+            CFRelease(cur);
+        }
+        let mut prev = PREVIOUS_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+        let back = prev
+            .as_ref()
+            .filter(|p| Some(*p) != cur_id.as_ref())
+            .and_then(|p| ids.iter().position(|x| x.as_ref() == Some(p)));
+        let next = || {
+            let at = ids.iter().position(|x| x.is_some() && *x == cur_id);
+            at.map(|i| (i + 1) % n as usize).unwrap_or(0)
+        };
+        if n > 0 {
+            let target = back.unwrap_or_else(next);
+            TISSelectInputSource(CFArrayGetValueAtIndex(list, target as isize));
+            *prev = cur_id;
+        }
+        CFRelease(list);
+    }
+}
+
 /// Open System Settings at Privacy & Security > Accessibility.
 pub fn open_accessibility_settings() {
     let _ = Command::new("open")
@@ -549,6 +618,10 @@ impl Poster {
                         CGEventPost(kCGHIDEventTap, e);
                         CFRelease(e as CFTypeRef);
                     }
+                    return;
+                }
+                Out::SwitchInput => {
+                    on_main(switch_input_source);
                     return;
                 }
                 Out::Scroll { dy, dx } => {

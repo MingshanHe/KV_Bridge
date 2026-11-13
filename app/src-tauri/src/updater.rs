@@ -21,7 +21,10 @@ pub struct Asset {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Latest {
     pub version: String,
+    // Each platform reads only its own entry.
+    #[allow(dead_code)]
     pub windows: Asset,
+    #[allow(dead_code)]
     pub macos: Asset,
 }
 

@@ -19,7 +19,8 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-ureq = "2"
+# System certificates, so update checks also work behind company HTTPS inspection.
+ureq = { version = "2", features = ["native-certs"] }
 kvm-core = { path = "../../core" }
 kvm-net = { path = "../../net" }
 

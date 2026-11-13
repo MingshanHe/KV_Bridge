@@ -80,6 +80,7 @@ jobs:
           fi
           codesign --verify --deep --strict "$APP"
           codesign -d -r- "$APP"
+          plutil -p "$APP/Contents/Info.plist" | grep -E "LSUIElement|NSLocalNetwork|NSBonjour|kvbridge|CFBundleShortVersion"
       - name: Make dmg
         run: |
           APP="$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app)"
